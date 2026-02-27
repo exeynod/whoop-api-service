@@ -1,0 +1,22 @@
+version: "3.9"
+
+services:
+  whoop-service:
+    build: .
+    container_name: whoop-service
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./cache:/cache
+      - ./secrets:/secrets
+    networks:
+      - openclaw_internal
+    # Для первичной OAuth-авторизации временно откройте порт:
+    # ports:
+    #   - "8001:8001"
+
+networks:
+  openclaw_internal:
+    driver: bridge
+    internal: true
