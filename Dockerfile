@@ -14,11 +14,12 @@ RUN python -m venv /opt/venv \
 
 COPY app ./app
 
-RUN addgroup --system app && adduser --system --ingroup app app \
+RUN groupadd --gid 1000 app \
+    && useradd --uid 1000 --gid 1000 --create-home --home-dir /home/app --shell /usr/sbin/nologin app \
     && mkdir -p /cache /secrets \
-    && chown -R app:app /app /cache /secrets
+    && chown -R 1000:1000 /app /cache /secrets /home/app
 
-USER app
+USER 1000:1000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD python -c "import json,sys,urllib.request; r=urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=3); d=json.loads(r.read().decode()); sys.exit(0 if d.get('status')=='ok' else 1)"
