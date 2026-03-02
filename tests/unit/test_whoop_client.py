@@ -394,6 +394,108 @@ async def test_fetch_yesterday_snapshot_rejects_other_day_cycle():
 
 @pytest.mark.unit
 @pytest.mark.asyncio
+async def test_fetch_yesterday_snapshot_uses_sleep_cycle_for_target_day():
+    settings = get_settings()
+    client = WhoopClient(settings)
+    now = datetime.now(timezone.utc)
+    _write_profile_file(
+        settings.token_path,
+        profile_name="denis",
+        api_token="api-denis",
+        access_token="access",
+        refresh_token="refresh",
+        expires_at=now + timedelta(hours=1),
+        refresh_expires_at=now + timedelta(days=7),
+    )
+
+    with respx.mock(assert_all_called=True) as mock:
+        mock.get(f"{settings.whoop_api_base_url}/v2/cycle").respond(
+            200,
+            json={
+                "records": [
+                    {
+                        "id": 1341472781,
+                        "score_state": "SCORED",
+                        "start": "2026-03-01T19:45:51.001Z",
+                        "end": None,
+                        "score": {
+                            "strain": 4.6107326,
+                            "kilojoule": 5110,
+                            "average_heart_rate": 58,
+                            "max_heart_rate": 128,
+                        },
+                    },
+                    {
+                        "id": 1339692348,
+                        "score_state": "SCORED",
+                        "start": "2026-02-28T23:45:42.865Z",
+                        "end": "2026-03-01T19:45:51.001Z",
+                        "score": {
+                            "strain": 15.648103,
+                            "kilojoule": 1823,
+                            "average_heart_rate": 112,
+                            "max_heart_rate": 171,
+                        },
+                    },
+                ]
+            },
+        )
+        mock.get(f"{settings.whoop_api_base_url}/v2/activity/sleep").respond(
+            200,
+            json={
+                "records": [
+                    {
+                        "id": "sleep-today",
+                        "score_state": "SCORED",
+                        "nap": False,
+                        "start": "2026-03-01T19:45:51.001Z",
+                        "end": "2026-03-02T03:53:12.237Z",
+                        "cycle_id": 1341472781,
+                        "score": {
+                            "sleep_performance_percentage": 74,
+                            "respiratory_rate": 13.8,
+                            "stage_summary": {
+                                "total_in_bed_time_milli": 29160000,
+                                "total_awake_time_milli": 2520000,
+                                "total_light_sleep_time_milli": 12960000,
+                                "total_rem_sleep_time_milli": 5760000,
+                                "total_slow_wave_sleep_time_milli": 8280000,
+                            },
+                        },
+                    },
+                    {
+                        "id": "sleep-yesterday",
+                        "score_state": "SCORED",
+                        "nap": False,
+                        "start": "2026-02-28T23:45:42.865Z",
+                        "end": "2026-03-01T06:05:45.129Z",
+                        "cycle_id": 1339692348,
+                        "score": {
+                            "sleep_performance_percentage": 72,
+                            "respiratory_rate": 14.8,
+                            "stage_summary": {
+                                "total_in_bed_time_milli": 18000000,
+                                "total_awake_time_milli": 1800000,
+                                "total_light_sleep_time_milli": 9000000,
+                                "total_rem_sleep_time_milli": 3600000,
+                                "total_slow_wave_sleep_time_milli": 3600000,
+                            },
+                        },
+                    },
+                ]
+            },
+        )
+
+        result = await client.fetch_yesterday_snapshot("denis", date(2026, 3, 1))
+
+    assert result["status"] == "ready"
+    assert result["strain"]["score"] == 15.6
+    assert result["sleep"]["score"] == 72
+    assert result["sleep"]["total_hours"] == 5.0
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
 async def test_fetch_week_day_returns_missing_when_any_source_absent():
     settings = get_settings()
     client = WhoopClient(settings)
@@ -416,6 +518,134 @@ async def test_fetch_week_day_returns_missing_when_any_source_absent():
         result = await client.fetch_week_day("denis", date(2026, 2, 25))
 
     assert result == {"date": "2026-02-25", "status": "missing"}
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_fetch_week_day_uses_recovery_and_cycle_linked_to_target_sleep():
+    settings = get_settings()
+    client = WhoopClient(settings)
+    now = datetime.now(timezone.utc)
+    _write_profile_file(
+        settings.token_path,
+        profile_name="denis",
+        api_token="api-denis",
+        access_token="access",
+        refresh_token="refresh",
+        expires_at=now + timedelta(hours=1),
+        refresh_expires_at=now + timedelta(days=7),
+    )
+
+    with respx.mock(assert_all_called=True) as mock:
+        mock.get(f"{settings.whoop_api_base_url}/v2/cycle").respond(
+            200,
+            json={
+                "records": [
+                    {
+                        "id": 1341472781,
+                        "score_state": "SCORED",
+                        "start": "2026-03-01T19:45:51.001Z",
+                        "end": None,
+                        "score": {
+                            "strain": 4.6107326,
+                            "kilojoule": 5110,
+                            "average_heart_rate": 58,
+                            "max_heart_rate": 128,
+                        },
+                    },
+                    {
+                        "id": 1339692348,
+                        "score_state": "SCORED",
+                        "start": "2026-02-28T23:45:42.865Z",
+                        "end": "2026-03-01T19:45:51.001Z",
+                        "score": {
+                            "strain": 15.648103,
+                            "kilojoule": 1823,
+                            "average_heart_rate": 112,
+                            "max_heart_rate": 171,
+                        },
+                    },
+                ]
+            },
+        )
+        mock.get(f"{settings.whoop_api_base_url}/v2/recovery").respond(
+            200,
+            json={
+                "records": [
+                    {
+                        "score_state": "SCORED",
+                        "cycle_id": 1341472781,
+                        "score": {
+                            "recovery_score": 86,
+                            "resting_heart_rate": 45,
+                            "hrv_rmssd_milli": 110,
+                        },
+                    },
+                    {
+                        "score_state": "SCORED",
+                        "cycle_id": 1339692348,
+                        "score": {
+                            "recovery_score": 70,
+                            "resting_heart_rate": 49,
+                            "hrv_rmssd_milli": 101,
+                        },
+                    },
+                ]
+            },
+        )
+        mock.get(f"{settings.whoop_api_base_url}/v2/activity/sleep").respond(
+            200,
+            json={
+                "records": [
+                    {
+                        "id": "sleep-today",
+                        "score_state": "SCORED",
+                        "nap": False,
+                        "start": "2026-03-01T19:45:51.001Z",
+                        "end": "2026-03-02T03:53:12.237Z",
+                        "cycle_id": 1341472781,
+                        "score": {
+                            "sleep_performance_percentage": 74,
+                            "respiratory_rate": 13.8,
+                            "stage_summary": {
+                                "total_in_bed_time_milli": 29160000,
+                                "total_awake_time_milli": 2520000,
+                                "total_light_sleep_time_milli": 12960000,
+                                "total_rem_sleep_time_milli": 5760000,
+                                "total_slow_wave_sleep_time_milli": 8280000,
+                            },
+                        },
+                    },
+                    {
+                        "id": "sleep-yesterday",
+                        "score_state": "SCORED",
+                        "nap": False,
+                        "start": "2026-02-28T23:45:42.865Z",
+                        "end": "2026-03-01T06:05:45.129Z",
+                        "cycle_id": 1339692348,
+                        "score": {
+                            "sleep_performance_percentage": 72,
+                            "respiratory_rate": 14.8,
+                            "stage_summary": {
+                                "total_in_bed_time_milli": 18000000,
+                                "total_awake_time_milli": 1800000,
+                                "total_light_sleep_time_milli": 9000000,
+                                "total_rem_sleep_time_milli": 3600000,
+                                "total_slow_wave_sleep_time_milli": 3600000,
+                            },
+                        },
+                    },
+                ]
+            },
+        )
+
+        result = await client.fetch_week_day("denis", date(2026, 3, 1))
+
+    assert result["status"] == "ready"
+    assert result["strain_score"] == 15.6
+    assert result["sleep_score"] == 72
+    assert result["sleep_hours"] == 5.0
+    assert result["recovery_score"] == 70
 
 
 @pytest.mark.unit

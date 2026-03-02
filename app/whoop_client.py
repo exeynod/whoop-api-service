@@ -236,8 +236,12 @@ class WhoopClient:
             self._fetch_collection(profile_name, "/v2/activity/sleep", start_utc, end_utc),
         )
 
-        cycle = self._pick_scored_cycle(cycle_records, target_date)
-        sleep = self._pick_scored_sleep(sleep_records, target_date)
+        sleep = self._pick_scored_sleep_for_day(sleep_records, target_date)
+        cycle = self._pick_cycle_for_sleep_day(
+            cycle_records=cycle_records,
+            target_date=target_date,
+            sleep_record=sleep,
+        )
 
         if cycle is None or sleep is None:
             raise UnexpectedWhoopResponseError("Expected scored cycle and sleep for the day")
@@ -259,9 +263,17 @@ class WhoopClient:
             self._fetch_collection(profile_name, "/v2/activity/sleep", start_utc, end_utc),
         )
 
-        cycle = self._pick_scored_cycle(cycle_records, target_date)
-        recovery = self._pick_scored_recovery(recovery_records, target_date)
-        sleep = self._pick_scored_sleep(sleep_records, target_date)
+        sleep = self._pick_scored_sleep_for_day(sleep_records, target_date)
+        cycle = self._pick_cycle_for_sleep_day(
+            cycle_records=cycle_records,
+            target_date=target_date,
+            sleep_record=sleep,
+        )
+        recovery = self._pick_recovery_for_sleep_cycle(
+            recovery_records=recovery_records,
+            target_date=target_date,
+            sleep_record=sleep,
+        )
 
         if cycle is None or recovery is None or sleep is None:
             return {"date": target_date.isoformat(), "status": "missing"}
@@ -689,6 +701,88 @@ class WhoopClient:
         if parsed.tzinfo is None:
             return parsed.replace(tzinfo=timezone.utc)
         return parsed
+
+    def _pick_scored_sleep_for_day(self, records: list[dict[str, Any]], target_date: date) -> dict[str, Any] | None:
+        candidates: list[tuple[datetime, dict[str, Any]]] = []
+        for record in records:
+            if bool(record.get("nap")):
+                continue
+            if self._score_state(record) != "SCORED":
+                continue
+
+            end_dt = self._record_datetime(record, "end")
+            if end_dt is None:
+                continue
+            if end_dt.astimezone(self._tz).date() != target_date:
+                continue
+            candidates.append((end_dt, record))
+
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        return candidates[0][1]
+
+    def _pick_cycle_for_sleep_day(
+        self,
+        cycle_records: list[dict[str, Any]],
+        target_date: date,
+        sleep_record: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        cycle_id = sleep_record.get("cycle_id") if sleep_record else None
+        selected = self._find_scored_record_by_id(cycle_records, "id", cycle_id)
+        if selected is not None:
+            return selected
+
+        # Fallback: pick latest scored cycle that ended on target day.
+        by_end: list[tuple[datetime, dict[str, Any]]] = []
+        for record in cycle_records:
+            if self._score_state(record) != "SCORED":
+                continue
+            end_dt = self._record_datetime(record, "end")
+            if end_dt is None:
+                continue
+            if end_dt.astimezone(self._tz).date() == target_date:
+                by_end.append((end_dt, record))
+
+        if by_end:
+            by_end.sort(key=lambda item: item[0], reverse=True)
+            return by_end[0][1]
+
+        return self._pick_scored_cycle(cycle_records, target_date)
+
+    def _pick_recovery_for_sleep_cycle(
+        self,
+        recovery_records: list[dict[str, Any]],
+        target_date: date,
+        sleep_record: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        cycle_id = sleep_record.get("cycle_id") if sleep_record else None
+        selected = self._find_scored_record_by_id(recovery_records, "cycle_id", cycle_id)
+        if selected is not None:
+            return selected
+        return self._pick_scored_recovery(recovery_records, target_date)
+
+    def _find_scored_record_by_id(
+        self,
+        records: list[dict[str, Any]],
+        id_key: str,
+        expected_id: Any,
+    ) -> dict[str, Any] | None:
+        if expected_id is None:
+            return None
+        expected_raw = str(expected_id)
+        for record in records:
+            if self._score_state(record) != "SCORED":
+                continue
+            if str(record.get(id_key)) == expected_raw:
+                return record
+        return None
+
+    def _record_datetime(self, record: dict[str, Any], key: str) -> datetime | None:
+        value = record.get(key)
+        if not isinstance(value, str):
+            return None
+        return self._parse_datetime(value)
 
     @staticmethod
     def _score_state(record: dict[str, Any]) -> str:
