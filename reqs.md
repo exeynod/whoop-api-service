@@ -37,6 +37,7 @@ OAuth2 Authorization Code Flow.
 Требуется ручное переподключение через `/auth/init`.
 
 Credentials (`client_id`, `client_secret`) — из `.env`.
+Запрашиваемый scope: `offline read:recovery read:sleep read:cycles read:workout read:profile read:body_measurement`.
 
 ### Первичная авторизация (первый запуск)
 
@@ -65,11 +66,17 @@ Credentials (`client_id`, `client_secret`) — из `.env`.
 - `/cycles` и `/workouts` используют range-кэш по ключу `start|end|limit|next_token` с TTL:
   - `RANGE_READY_TTL_SECONDS` (по умолчанию `43200`)
   - `RANGE_PENDING_TTL_SECONDS` зарезервирован (по умолчанию `300`)
+- `/measurements/body` не использует cache-read; при `ready` сохраняется snapshot в `body_measurement_YYYY-MM-DD.json`
+- `/measurements/body/history` читает только локальные snapshots (synthetic history)
 
 ### Очистка кэша
-Файлы старше 30 дней удаляются по двум триггерам:
+Файлы старше retention удаляются по двум триггерам:
 - Cron внутри контейнера: раз в сутки в 03:00 MSK
 - При старте сервиса (дополнительно)
+
+Retention:
+- `body_measurement_*`: 365 дней
+- остальные date-cache файлы: 30 дней
 
 ---
 
@@ -291,13 +298,14 @@ Recovery текущего дня по MSK.
 
 ### `GET /cycles`
 
-История физиологических циклов за произвольный диапазон (MSK), с локальной пагинацией по дням.
+История физиологических циклов за произвольный диапазон (MSK), с локальной пагинацией.
 
 Query:
 - `start` (required, ISO8601 datetime с timezone)
 - `end` (optional, ISO8601 datetime с timezone, default = `now`)
 - `limit` (optional, `1..25`, default `10`)
 - `next_token` (optional, `YYYY-MM-DD`)
+- глубина диапазона: `end - start <= 365 days` (иначе `422`)
 
 **Response `200`:**
 ```json
@@ -335,6 +343,7 @@ Query:
 Примечания:
 - отсутствующие метрики из Whoop пропускаются (не возвращаются как `null`);
 - `next_token` используется только в snake_case.
+- если диапазон больше 14 дней, сервис выполняет weekly rollup (1 значение на неделю, усреднение числовых метрик).
 
 ---
 
@@ -347,6 +356,7 @@ Query:
 - `end` (optional, ISO8601 datetime с timezone, default = `now`)
 - `limit` (optional, `1..25`, default `10`)
 - `next_token` (optional, passthrough токен Whoop)
+- глубина диапазона: `end - start <= 365 days` (иначе `422`)
 
 **Response `200`:**
 ```json
@@ -390,6 +400,90 @@ Query:
 
 ---
 
+### `GET /measurements/body`
+
+Актуальный snapshot измерений тела из WHOOP `GET /v2/user/measurement/body`.
+
+Query:
+- нет
+
+**Response `200` — `ready`:**
+```json
+{
+  "status": "ready",
+  "measured_at": "2026-03-02T12:10:59Z",
+  "height_meter": 1.8288,
+  "weight_kilogram": 90.7185,
+  "max_heart_rate": 200,
+  "timezone_offset": "+03:00",
+  "cached": false
+}
+```
+
+**Response `200` — `pending`:**
+```json
+{
+  "status": "pending",
+  "reason": "Body measurements are not available yet."
+}
+```
+
+Примечания:
+- отсутствующие поля WHOOP пропускаются (без `null`);
+- при `ready` сервис сохраняет snapshot в локальную историю.
+
+---
+
+### `GET /measurements/body/history`
+
+Synthetic history измерений тела из локально накопленных snapshots.
+
+Query:
+- `start` (required, ISO8601 datetime с timezone)
+- `end` (optional, ISO8601 datetime с timezone, default = `now`)
+- `limit` (optional, `1..25`, default `10`)
+- `next_token` (optional, `YYYY-MM-DD`)
+- глубина диапазона: `end - start <= 365 days` (иначе `422`)
+
+**Response `200` — `ready`:**
+```json
+{
+  "status": "ready",
+  "period": {
+    "from": "2026-02-01",
+    "to": "2026-03-02"
+  },
+  "measurements": [
+    {
+      "date": "2026-03-02",
+      "measured_at": "2026-03-02T12:10:59Z",
+      "height_meter": 1.8288,
+      "weight_kilogram": 90.7185,
+      "max_heart_rate": 200
+    }
+  ],
+  "next_token": null,
+  "timezone_offset": "+03:00",
+  "cached": true
+}
+```
+
+**Response `200` — `pending`:**
+```json
+{
+  "status": "pending",
+  "reason": "Body measurements are not available yet."
+}
+```
+
+Примечания:
+- history не запрашивает upstream напрямую;
+- `next_token` только snake_case;
+- пагинация локальная по `date`.
+- если диапазон больше 14 дней, history downsampled до weekly averages (примерно 8 точек за 2 месяца).
+
+---
+
 ## Конфигурация (.env)
 
 ```
@@ -427,7 +521,7 @@ whoop-service/
 ├── .env.example
 ├── app/
 │   ├── main.py
-│   ├── router.py          ← /recovery/today, /day/yesterday, /week, /cycles, /workouts
+│   ├── router.py          ← /recovery/today, /day/yesterday, /week, /cycles, /workouts, /measurements/body, /measurements/body/history
 │   ├── auth_router.py     ← /auth/init, /auth/callback
 │   ├── whoop_client.py    ← OAuth2 + запросы к Whoop API
 │   ├── cache.py           ← файловый кэш + очистка по cron

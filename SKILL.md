@@ -1,6 +1,6 @@
 ---
 name: whoop-api-service
-description: Use this skill for requests about WHOOP recovery/sleep/strain/workout data through the local Whoop Service proxy. Trigger when user asks to fetch data from /recovery/today, /day/yesterday, /week, /cycles, /workouts.
+description: Use this skill for requests about WHOOP recovery/sleep/strain/workout/body measurements data through the local Whoop Service proxy. Trigger when user asks to fetch data from /recovery/today, /day/yesterday, /week, /cycles, /workouts, /measurements/body, /measurements/body/history.
 metadata: {"openclaw":{"skillKey":"whoopApiService","requires":{"env":["WHOOP_SERVICE_BASE_URL","WHOOP_SERVICE_TOKEN"]},"primaryEnv":"WHOOP_SERVICE_TOKEN"}}
 ---
 
@@ -33,6 +33,10 @@ Trigger words and phrases (Russian):
 - `циклы за месяц`
 - `тренировки whoop`
 - `workouts за период`
+- `измерения тела whoop`
+- `body measurements`
+- `вес и рост whoop`
+- `история измерений`
 - `recovery sleep strain`
 
 ## Route Map
@@ -44,6 +48,8 @@ Protected routes (must send `X-API-Key: ${WHOOP_SERVICE_TOKEN}`):
 - `GET /week`
 - `GET /cycles`
 - `GET /workouts`
+- `GET /measurements/body`
+- `GET /measurements/body/history`
 
 ## Call Rules
 
@@ -53,9 +59,12 @@ Protected routes (must send `X-API-Key: ${WHOOP_SERVICE_TOKEN}`):
 - For protected routes always send header `X-API-Key`.
 - Do not send JSON body for these `GET` endpoints.
 - For collection pagination use only `next_token` (snake_case).
-- For `/cycles` and `/workouts`, `start` is required and must include timezone offset (ISO8601 datetime).
+- For `/cycles`, `/workouts`, `/measurements/body/history`, `start` is required and must include timezone offset (ISO8601 datetime).
 - For `/cycles`, `next_token` (if present) must be `YYYY-MM-DD`.
-- For `/cycles` and `/workouts`, keep `limit` in `1..25` (default `10`).
+- For `/measurements/body/history`, `next_token` (if present) must be `YYYY-MM-DD`.
+- For `/cycles`, `/workouts`, `/measurements/body/history`, keep `limit` in `1..25` (default `10`).
+- For `/cycles`, `/workouts`, `/measurements/body/history`, enforce range depth `<= 365 days` (`end - start`).
+- For `/cycles` and `/measurements/body/history`, if range is over 14 days, expect weekly averaged output (roughly one point per week).
 
 ## Response Contracts
 
@@ -70,6 +79,12 @@ Protected routes (must send `X-API-Key: ${WHOOP_SERVICE_TOKEN}`):
   - `200 ready`: `{"status":"ready","period":{"from":"YYYY-MM-DD","to":"YYYY-MM-DD"},"days":[...],"next_token":<string|null>,"timezone_offset":"+03:00","cached":<bool>}`
 - `/workouts`:
   - `200 ready`: `{"status":"ready","period":{"from":"YYYY-MM-DD","to":"YYYY-MM-DD"},"workouts":[{"sport_name":"...","zone_durations"?:{...},...}],"next_token":<string|null>,"timezone_offset":"+03:00","cached":<bool>}`
+- `/measurements/body`:
+  - `200 ready`: `{"status":"ready","measured_at":"ISO8601","height_meter"?:<float>,"weight_kilogram"?:<float>,"max_heart_rate"?:<int>,"timezone_offset":"+03:00","cached":false}`
+  - `200 pending`: `{"status":"pending","reason":"Body measurements are not available yet."}`
+- `/measurements/body/history`:
+  - `200 ready`: `{"status":"ready","period":{"from":"YYYY-MM-DD","to":"YYYY-MM-DD"},"measurements":[{"date":"YYYY-MM-DD","measured_at":"ISO8601",...}],"next_token":<string|null>,"timezone_offset":"+03:00","cached":true}`
+  - `200 pending`: `{"status":"pending","reason":"Body measurements are not available yet."}`
 - Errors:
   - `401`: invalid/missing API key (`{"detail":"Unauthorized"}`)
   - `401`: reauthorization required (`{"status":"error","reason":"Reauthorization required"}`)
@@ -91,6 +106,17 @@ Protected routes (must send `X-API-Key: ${WHOOP_SERVICE_TOKEN}`):
   - support `start`, `end`, `limit`, `next_token`;
   - return `ready` with `cached` flag and `timezone_offset`;
   - use range-cache (TTL by service config).
+- `/cycles`:
+  - for ranges `>14` days, service returns weekly rollup (averaged numeric fields).
+- `/measurements/body`:
+  - always requests live upstream snapshot;
+  - does not serve from cache;
+  - saves `ready` payload as local snapshot for history.
+- `/measurements/body/history`:
+  - reads only local snapshots;
+  - local pagination by `date` with `next_token=YYYY-MM-DD`;
+  - for ranges `>14` days, returns weekly averaged points;
+  - no upstream calls.
 
 ## Curl Templates
 
@@ -217,6 +243,20 @@ Scenario (RU request): `Покажи тренировки за период` or 
 
 ```bash
 curl -sS "${WHOOP_SERVICE_BASE_URL}/workouts?start=2026-02-01T00:00:00%2B03:00&end=2026-03-02T00:00:00%2B03:00&limit=10" \
+  -H "X-API-Key: ${WHOOP_SERVICE_TOKEN}"
+```
+
+Scenario (RU request): `Покажи актуальные измерения тела` or `Какой сейчас вес/рост`
+
+```bash
+curl -sS "${WHOOP_SERVICE_BASE_URL}/measurements/body" \
+  -H "X-API-Key: ${WHOOP_SERVICE_TOKEN}"
+```
+
+Scenario (RU request): `Покажи историю измерений тела за период`
+
+```bash
+curl -sS "${WHOOP_SERVICE_BASE_URL}/measurements/body/history?start=2026-02-01T00:00:00%2B03:00&end=2026-03-02T00:00:00%2B03:00&limit=10" \
   -H "X-API-Key: ${WHOOP_SERVICE_TOKEN}"
 ```
 

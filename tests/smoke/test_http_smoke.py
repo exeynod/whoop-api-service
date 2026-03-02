@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -24,6 +24,7 @@ class FakeWhoopClient:
         self.week_calls = 0
         self.cycles_calls = 0
         self.workouts_calls = 0
+        self.body_measurements_calls = 0
         self.profile_resolve_calls = 0
         self.profile_map = {"test-api-key": "denis"}
         self._recovery_payloads: list[dict] = []
@@ -31,11 +32,13 @@ class FakeWhoopClient:
         self._week_payloads: list[dict] = []
         self._cycles_payloads: list[dict] = []
         self._workouts_payloads: list[dict] = []
+        self._body_payloads: list[dict] = []
         self._recovery_exc: Exception | None = None
         self._day_exc: Exception | None = None
         self._week_exc: Exception | None = None
         self._cycles_exc: Exception | None = None
         self._workouts_exc: Exception | None = None
+        self._body_exc: Exception | None = None
         self.last_cycles_args: dict | None = None
         self.last_workouts_args: dict | None = None
 
@@ -200,6 +203,21 @@ class FakeWhoopClient:
                 }
             ],
             "next_token": None,
+        }
+
+    async def fetch_body_measurements(self, profile_name: str) -> dict:
+        _ = profile_name
+        self.body_measurements_calls += 1
+        if self._body_exc:
+            raise self._body_exc
+        if self._body_payloads:
+            return self._body_payloads.pop(0)
+        return {
+            "status": "ready",
+            "measured_at": "2026-03-02T12:10:59Z",
+            "height_meter": 1.8288,
+            "weight_kilogram": 90.7185,
+            "max_heart_rate": 200,
         }
 
 
@@ -559,3 +577,226 @@ def test_workouts_is_cached_after_first_ready_and_passes_query_params():
     assert fake.last_workouts_args is not None
     assert fake.last_workouts_args["limit"] == 5
     assert fake.last_workouts_args["next_token"] == "abc"
+
+
+@pytest.mark.smoke
+def test_cycles_rejects_range_deeper_than_365_days():
+    fake = FakeWhoopClient()
+    now_dt = datetime(2026, 3, 2, 10, 0, tzinfo=ZoneInfo("Europe/Moscow"))
+    query = "/cycles?start=2025-01-01T00:00:00%2B03:00&end=2026-03-02T00:00:00%2B03:00"
+
+    with _client_with_fake_whoop(fake, now_dt) as client:
+        response = client.get(query, headers={"X-API-Key": "test-api-key"})
+
+    assert response.status_code == 422
+    assert "<= 365 days" in response.json()["detail"]
+
+
+@pytest.mark.smoke
+def test_workouts_rejects_range_deeper_than_365_days():
+    fake = FakeWhoopClient()
+    now_dt = datetime(2026, 3, 2, 10, 0, tzinfo=ZoneInfo("Europe/Moscow"))
+    query = "/workouts?start=2025-01-01T00:00:00%2B03:00&end=2026-03-02T00:00:00%2B03:00"
+
+    with _client_with_fake_whoop(fake, now_dt) as client:
+        response = client.get(query, headers={"X-API-Key": "test-api-key"})
+
+    assert response.status_code == 422
+    assert "<= 365 days" in response.json()["detail"]
+
+
+@pytest.mark.smoke
+def test_measurements_body_returns_ready_and_saves_snapshot(tmp_cache_dir):
+    fake = FakeWhoopClient()
+    now_dt = datetime(2026, 3, 2, 15, 0, tzinfo=ZoneInfo("Europe/Moscow"))
+
+    with _client_with_fake_whoop(fake, now_dt) as client:
+        response = client.get("/measurements/body", headers={"X-API-Key": "test-api-key"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "ready"
+    assert payload["cached"] is False
+    assert payload["timezone_offset"] == "+03:00"
+    assert fake.body_measurements_calls == 1
+
+    cache_file = tmp_cache_dir / "denis" / "body_measurement_2026-03-02.json"
+    assert cache_file.exists()
+    cached_payload = json.loads(cache_file.read_text(encoding="utf-8"))
+    assert cached_payload["status"] == "ready"
+    assert cached_payload["measured_at"] == "2026-03-02T12:10:59Z"
+
+
+@pytest.mark.smoke
+def test_measurements_body_returns_pending():
+    fake = FakeWhoopClient()
+    fake._body_payloads = [{"status": "pending", "reason": "Body measurements are not available yet."}]
+    now_dt = datetime(2026, 3, 2, 15, 0, tzinfo=ZoneInfo("Europe/Moscow"))
+
+    with _client_with_fake_whoop(fake, now_dt) as client:
+        response = client.get("/measurements/body", headers={"X-API-Key": "test-api-key"})
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "pending",
+        "reason": "Body measurements are not available yet.",
+    }
+
+
+@pytest.mark.smoke
+def test_measurements_body_maps_reauthorization_to_401():
+    fake = FakeWhoopClient()
+    fake._body_exc = ReauthorizationRequiredError("Reauthorization required")
+    now_dt = datetime(2026, 3, 2, 15, 0, tzinfo=ZoneInfo("Europe/Moscow"))
+
+    with _client_with_fake_whoop(fake, now_dt) as client:
+        response = client.get("/measurements/body", headers={"X-API-Key": "test-api-key"})
+
+    assert response.status_code == 401
+    assert response.json()["status"] == "error"
+    assert response.json()["reason"] == "Reauthorization required"
+
+
+@pytest.mark.smoke
+def test_measurements_body_history_pending_when_empty():
+    fake = FakeWhoopClient()
+    now_dt = datetime(2026, 3, 2, 15, 0, tzinfo=ZoneInfo("Europe/Moscow"))
+    query = "/measurements/body/history?start=2026-02-20T00:00:00%2B03:00&end=2026-03-02T23:59:59%2B03:00"
+
+    with _client_with_fake_whoop(fake, now_dt) as client:
+        response = client.get(query, headers={"X-API-Key": "test-api-key"})
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "pending",
+        "reason": "Body measurements are not available yet.",
+    }
+
+
+@pytest.mark.smoke
+def test_measurements_body_history_ready_with_pagination(tmp_cache_dir):
+    fake = FakeWhoopClient()
+    now_dt = datetime(2026, 3, 4, 10, 0, tzinfo=ZoneInfo("Europe/Moscow"))
+    profile_dir = tmp_cache_dir / "denis"
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    (profile_dir / "body_measurement_2026-03-01.json").write_text(
+        json.dumps(
+            {
+                "status": "ready",
+                "date": "2026-03-01",
+                "measured_at": "2026-03-01T06:00:00Z",
+                "height_meter": 1.8,
+                "weight_kilogram": 90.0,
+                "max_heart_rate": 198,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (profile_dir / "body_measurement_2026-03-02.json").write_text(
+        json.dumps(
+            {
+                "status": "ready",
+                "date": "2026-03-02",
+                "measured_at": "2026-03-02T06:00:00Z",
+                "height_meter": 1.8,
+                "weight_kilogram": 89.9,
+                "max_heart_rate": 199,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with _client_with_fake_whoop(fake, now_dt) as client:
+        headers = {"X-API-Key": "test-api-key"}
+        first = client.get(
+            "/measurements/body/history?start=2026-03-01T00:00:00%2B03:00&end=2026-03-03T00:00:00%2B03:00&limit=1",
+            headers=headers,
+        )
+        second = client.get(
+            "/measurements/body/history?start=2026-03-01T00:00:00%2B03:00&end=2026-03-03T00:00:00%2B03:00&limit=1&next_token=2026-03-02",
+            headers=headers,
+        )
+
+    assert first.status_code == 200
+    first_payload = first.json()
+    assert first_payload["status"] == "ready"
+    assert first_payload["cached"] is True
+    assert first_payload["next_token"] == "2026-03-02"
+    assert len(first_payload["measurements"]) == 1
+    assert first_payload["measurements"][0]["date"] == "2026-03-01"
+
+    assert second.status_code == 200
+    second_payload = second.json()
+    assert second_payload["status"] == "ready"
+    assert second_payload.get("next_token") is None
+    assert len(second_payload["measurements"]) == 1
+    assert second_payload["measurements"][0]["date"] == "2026-03-02"
+
+
+@pytest.mark.smoke
+def test_measurements_body_history_rolls_up_weekly_for_ranges_over_two_weeks(tmp_cache_dir):
+    fake = FakeWhoopClient()
+    now_dt = datetime(2026, 3, 25, 10, 0, tzinfo=ZoneInfo("Europe/Moscow"))
+    profile_dir = tmp_cache_dir / "denis"
+    profile_dir.mkdir(parents=True, exist_ok=True)
+
+    start_day = date(2026, 3, 1)
+    for idx in range(21):
+        current = start_day + timedelta(days=idx)
+        payload = {
+            "status": "ready",
+            "date": current.isoformat(),
+            "measured_at": f"{current.isoformat()}T06:00:00Z",
+            "height_meter": 1.8 + (idx * 0.001),
+            "weight_kilogram": 90.0 + (idx * 0.1),
+            "max_heart_rate": 190 + (idx % 3),
+        }
+        (profile_dir / f"body_measurement_{current.isoformat()}.json").write_text(
+            json.dumps(payload),
+            encoding="utf-8",
+        )
+
+    with _client_with_fake_whoop(fake, now_dt) as client:
+        response = client.get(
+            "/measurements/body/history?start=2026-03-01T00:00:00%2B03:00&end=2026-03-21T23:59:59%2B03:00&limit=10",
+            headers={"X-API-Key": "test-api-key"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "ready"
+    # 21 days should be downsampled to weekly windows.
+    assert len(payload["measurements"]) == 4
+    assert payload["measurements"][0]["date"] == "2026-02-23"
+    assert payload["measurements"][1]["date"] == "2026-03-02"
+    assert payload["measurements"][2]["date"] == "2026-03-09"
+    assert payload["measurements"][3]["date"] == "2026-03-16"
+
+
+@pytest.mark.smoke
+def test_measurements_body_history_validates_next_token_format():
+    fake = FakeWhoopClient()
+    now_dt = datetime(2026, 3, 4, 10, 0, tzinfo=ZoneInfo("Europe/Moscow"))
+
+    with _client_with_fake_whoop(fake, now_dt) as client:
+        response = client.get(
+            "/measurements/body/history?start=2026-03-01T00:00:00%2B03:00&end=2026-03-03T00:00:00%2B03:00&next_token=bad-token",
+            headers={"X-API-Key": "test-api-key"},
+        )
+
+    assert response.status_code == 422
+
+
+@pytest.mark.smoke
+def test_measurements_body_history_rejects_range_deeper_than_365_days():
+    fake = FakeWhoopClient()
+    now_dt = datetime(2026, 3, 4, 10, 0, tzinfo=ZoneInfo("Europe/Moscow"))
+
+    with _client_with_fake_whoop(fake, now_dt) as client:
+        response = client.get(
+            "/measurements/body/history?start=2024-01-01T00:00:00%2B03:00&end=2026-03-01T00:00:00%2B03:00",
+            headers={"X-API-Key": "test-api-key"},
+        )
+
+    assert response.status_code == 422
+    assert "<= 365 days" in response.json()["detail"]

@@ -168,3 +168,30 @@ class WorkoutsResponse(BaseModel):
     next_token: str | None = None
     cached: bool = False
     timezone_offset: str
+
+
+class BodyMeasurementReadyResponse(BaseModel):
+    status: Literal["ready"] = "ready"
+    measured_at: str
+    height_meter: float | None = None
+    weight_kilogram: float | None = None
+    max_heart_rate: int | None = None
+    timezone_offset: str
+    cached: bool = False
+
+
+class BodyMeasurementHistoryItemResponse(BaseModel):
+    date: str
+    measured_at: str
+    height_meter: float | None = None
+    weight_kilogram: float | None = None
+    max_heart_rate: int | None = None
+
+
+class BodyMeasurementHistoryReadyResponse(BaseModel):
+    status: Literal["ready"] = "ready"
+    period: PeriodResponse
+    measurements: list[BodyMeasurementHistoryItemResponse]
+    next_token: str | None = None
+    cached: bool = True
+    timezone_offset: str

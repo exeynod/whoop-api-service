@@ -5,6 +5,7 @@ import logging
 from datetime import date, datetime, timedelta, timezone
 from urllib.parse import parse_qs, urlparse
 
+import httpx
 import pytest
 import respx
 
@@ -63,6 +64,8 @@ async def test_build_authorization_url_contains_expected_oauth_params():
     assert query["state"] == ["state-123"]
     assert "read:recovery" in query["scope"][0]
     assert "read:workout" in query["scope"][0]
+    assert "read:profile" in query["scope"][0]
+    assert "read:body_measurement" in query["scope"][0]
 
 
 @pytest.mark.unit
@@ -916,6 +919,90 @@ async def test_fetch_cycles_range_aggregates_and_paginates_by_local_day_token():
 
 @pytest.mark.unit
 @pytest.mark.asyncio
+async def test_fetch_cycles_range_rolls_up_weekly_for_ranges_over_two_weeks():
+    settings = get_settings()
+    client = WhoopClient(settings)
+    now = datetime.now(timezone.utc)
+    _write_profile_file(
+        settings.token_path,
+        profile_name="denis",
+        api_token="api-denis",
+        access_token="access",
+        refresh_token="refresh",
+        expires_at=now + timedelta(hours=1),
+        refresh_expires_at=now + timedelta(days=7),
+    )
+    msk = timezone(timedelta(hours=3))
+    start = datetime(2026, 3, 1, 0, 0, tzinfo=msk)
+    end = datetime(2026, 3, 21, 23, 59, tzinfo=msk)
+
+    cycle_records = []
+    recovery_records = []
+    sleep_records = []
+    for idx in range(21):
+        target_day = date(2026, 3, 1) + timedelta(days=idx)
+        cycle_id = 900000 + idx
+        day_start = datetime.combine(target_day, datetime.min.time(), tzinfo=timezone.utc)
+        day_end = day_start + timedelta(hours=8)
+        cycle_records.append(
+            {
+                "id": cycle_id,
+                "score_state": "SCORED",
+                "start": day_start.isoformat().replace("+00:00", "Z"),
+                "end": day_end.isoformat().replace("+00:00", "Z"),
+                "score": {"strain": 10.0 + idx / 10.0, "kilojoule": 1000 + idx},
+            }
+        )
+        recovery_records.append(
+            {
+                "score_state": "SCORED",
+                "cycle_id": cycle_id,
+                "end": day_end.isoformat().replace("+00:00", "Z"),
+                "score": {
+                    "recovery_score": 70 + (idx % 3),
+                    "resting_heart_rate": 50,
+                    "hrv_rmssd_milli": 100,
+                },
+            }
+        )
+        sleep_records.append(
+            {
+                "score_state": "SCORED",
+                "nap": False,
+                "cycle_id": cycle_id,
+                "end": day_end.isoformat().replace("+00:00", "Z"),
+                "score": {
+                    "sleep_performance_percentage": 80,
+                    "disturbance_count": 2,
+                    "stage_summary": {"total_in_bed_time_milli": 25200000},
+                },
+            }
+        )
+
+    with respx.mock(assert_all_called=True) as mock:
+        mock.get(f"{settings.whoop_api_base_url}/v2/cycle").respond(200, json={"records": cycle_records})
+        mock.get(f"{settings.whoop_api_base_url}/v2/recovery").respond(200, json={"records": recovery_records})
+        mock.get(f"{settings.whoop_api_base_url}/v2/activity/sleep").respond(200, json={"records": sleep_records})
+
+        result = await client.fetch_cycles_range(
+            profile_name="denis",
+            start=start,
+            end=end,
+            limit=25,
+            next_token=None,
+        )
+
+    assert result["status"] == "ready"
+    # 2026-03-01..2026-03-21 covers 4 calendar weeks in local rollup.
+    assert len(result["days"]) == 4
+    assert [row["date"] for row in result["days"]] == ["2026-02-23", "2026-03-02", "2026-03-09", "2026-03-16"]
+    assert "cycle_id" not in result["days"][0]
+    assert "recovery_score" in result["days"][0]
+    assert result["next_token"] is None
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
 async def test_fetch_workouts_range_maps_payload_and_next_token():
     settings = get_settings()
     client = WhoopClient(settings)
@@ -989,6 +1076,106 @@ async def test_fetch_workouts_range_maps_payload_and_next_token():
     assert result["workouts"][0]["zone_durations"]["zone_three_milli"] == 900000
     assert result["workouts"][1]["workout_id"] == "w2"
     assert result["workouts"][1]["sport_name"] == "unknown"
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_fetch_body_measurements_maps_ready_payload():
+    settings = get_settings()
+    client = WhoopClient(settings)
+    now = datetime.now(timezone.utc)
+    _write_profile_file(
+        settings.token_path,
+        profile_name="denis",
+        api_token="api-denis",
+        access_token="access",
+        refresh_token="refresh",
+        expires_at=now + timedelta(hours=1),
+        refresh_expires_at=now + timedelta(days=7),
+    )
+
+    with respx.mock(assert_all_called=True) as mock:
+        mock.get(f"{settings.whoop_api_base_url}/v2/user/measurement/body").respond(
+            200,
+            json={
+                "height_meter": 1.8288,
+                "weight_kilogram": 90.7185,
+                "max_heart_rate": 200,
+                "updated_at": "2026-03-02T12:10:59Z",
+            },
+        )
+        result = await client.fetch_body_measurements("denis")
+
+    assert result["status"] == "ready"
+    assert result["measured_at"] == "2026-03-02T12:10:59Z"
+    assert result["height_meter"] == 1.8288
+    assert result["weight_kilogram"] == 90.7185
+    assert result["max_heart_rate"] == 200
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_fetch_body_measurements_returns_pending_on_404():
+    settings = get_settings()
+    client = WhoopClient(settings)
+    now = datetime.now(timezone.utc)
+    _write_profile_file(
+        settings.token_path,
+        profile_name="denis",
+        api_token="api-denis",
+        access_token="access",
+        refresh_token="refresh",
+        expires_at=now + timedelta(hours=1),
+        refresh_expires_at=now + timedelta(days=7),
+    )
+
+    with respx.mock(assert_all_called=True) as mock:
+        mock.get(f"{settings.whoop_api_base_url}/v2/user/measurement/body").respond(
+            404,
+            json={"message": "Not Found"},
+        )
+        result = await client.fetch_body_measurements("denis")
+
+    assert result == {
+        "status": "pending",
+        "reason": "Body measurements are not available yet.",
+    }
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_fetch_body_measurements_raises_reauthorization_on_double_401():
+    settings = get_settings()
+    client = WhoopClient(settings)
+    now = datetime.now(timezone.utc)
+    _write_profile_file(
+        settings.token_path,
+        profile_name="denis",
+        api_token="api-denis",
+        access_token="stale-access",
+        refresh_token="refresh",
+        expires_at=now + timedelta(hours=1),
+        refresh_expires_at=now + timedelta(days=7),
+    )
+
+    with respx.mock(assert_all_called=True) as mock:
+        route = mock.get(f"{settings.whoop_api_base_url}/v2/user/measurement/body")
+        route.side_effect = [
+            httpx.Response(401, json={"message": "Unauthorized"}),
+            httpx.Response(401, json={"message": "Unauthorized"}),
+        ]
+        mock.post(settings.whoop_oauth_token_url).respond(
+            200,
+            json={
+                "access_token": "fresh-access",
+                "refresh_token": "refresh",
+                "expires_in": 3600,
+                "refresh_token_expires_in": 86400,
+            },
+        )
+
+        with pytest.raises(ReauthorizationRequiredError):
+            await client.fetch_body_measurements("denis")
 
 
 @pytest.mark.unit

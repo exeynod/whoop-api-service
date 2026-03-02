@@ -126,3 +126,25 @@ async def test_live_v2_cycle_30_day_window_contract_shape():
     payload = cycle_resp.json()
     assert isinstance(payload, dict)
     assert isinstance(payload.get("records"), list)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_live_v2_body_measurements_contract_shape():
+    secrets = _load_live_secrets()
+    token = secrets["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+    url = f"{_developer_base()}/v2/user/measurement/body"
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        response = await client.get(url, headers=headers)
+
+    assert response.status_code in {200, 401}, response.text
+    if response.status_code == 401:
+        return
+
+    payload = response.json()
+    assert isinstance(payload, dict)
+    for field in ("height_meter", "weight_kilogram", "max_heart_rate"):
+        if field in payload:
+            assert payload[field] is not None

@@ -8,6 +8,8 @@ from zoneinfo import ZoneInfo
 
 
 class FileCache:
+    BODY_MEASUREMENT_RETENTION_DAYS = 365
+
     def __init__(self, cache_dir: Path, timezone_name: str, retention_days: int = 30) -> None:
         self.cache_dir = cache_dir
         self.retention_days = retention_days
@@ -109,6 +111,47 @@ class FileCache:
         temp_path.replace(path)
         return True
 
+    def save_body_snapshot(self, profile_name: str, snapshot_date: date, payload: dict) -> bool:
+        if payload.get("status") != "ready":
+            return False
+        measured_at = payload.get("measured_at")
+        if not isinstance(measured_at, str) or not measured_at:
+            return False
+
+        snapshot_payload: dict[str, object] = {
+            "status": "ready",
+            "date": snapshot_date.isoformat(),
+            "measured_at": measured_at,
+        }
+        for key in ("height_meter", "weight_kilogram", "max_heart_rate"):
+            value = payload.get(key)
+            if value is not None:
+                snapshot_payload[key] = value
+        return self.save_ready(profile_name, "body_measurement", snapshot_date, snapshot_payload)
+
+    def load_body_history(self, profile_name: str, start_date: date, end_date: date) -> list[dict]:
+        if end_date < start_date:
+            return []
+
+        items: list[dict] = []
+        current = start_date
+        while current <= end_date:
+            payload = self.load_ready(profile_name, "body_measurement", current)
+            if payload:
+                measured_at = payload.get("measured_at")
+                if isinstance(measured_at, str) and measured_at:
+                    item: dict[str, object] = {
+                        "date": payload.get("date", current.isoformat()),
+                        "measured_at": measured_at,
+                    }
+                    for key in ("height_meter", "weight_kilogram", "max_heart_rate"):
+                        value = payload.get(key)
+                        if value is not None:
+                            item[key] = value
+                    items.append(item)
+            current += timedelta(days=1)
+        return items
+
     def cleanup_expired(self, today: date | None = None) -> int:
         current_day = today or datetime.now(self._tz).date()
         current_utc = datetime.now(timezone.utc)
@@ -117,8 +160,12 @@ class FileCache:
         for file_path in self.cache_dir.rglob("*.json"):
             extracted_date = self._extract_date(file_path)
             if extracted_date is not None:
+                endpoint = self._extract_endpoint(file_path)
+                retention_days = self.retention_days
+                if endpoint == "body_measurement":
+                    retention_days = self.BODY_MEASUREMENT_RETENTION_DAYS
                 age = (current_day - extracted_date).days
-                if age > self.retention_days:
+                if age > retention_days:
                     file_path.unlink(missing_ok=True)
                     deleted += 1
                 continue
@@ -141,6 +188,16 @@ class FileCache:
             return date.fromisoformat(date_fragment)
         except ValueError:
             return None
+
+    @staticmethod
+    def _extract_endpoint(file_path: Path) -> str | None:
+        stem = file_path.stem
+        if "_" not in stem:
+            return None
+        endpoint = stem.rsplit("_", maxsplit=1)[0]
+        if not endpoint:
+            return None
+        return endpoint
 
     def _is_range_cache_expired(self, file_path: Path, current_utc: datetime) -> bool:
         try:

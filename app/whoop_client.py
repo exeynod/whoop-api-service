@@ -83,8 +83,22 @@ class WorkoutsRangeResult(TypedDict):
     next_token: str | None
 
 
+class BodyMeasurementPendingResult(TypedDict):
+    status: Literal["pending"]
+    reason: str
+
+
+class BodyMeasurementReadyResult(TypedDict, total=False):
+    status: Literal["ready"]
+    measured_at: str
+    height_meter: float
+    weight_kilogram: float
+    max_heart_rate: int
+
+
 RecoveryResult = Union[RecoveryPendingResult, RecoveryReadyResult]
 WeekDayResult = Union[WeekDayMissingResult, WeekDayReadyResult]
+BodyMeasurementResult = Union[BodyMeasurementPendingResult, BodyMeasurementReadyResult]
 
 
 class TokenBundle(BaseModel):
@@ -154,7 +168,7 @@ class WhoopClient:
             "response_type": "code",
             "client_id": self.settings.whoop_client_id,
             "redirect_uri": self.settings.whoop_redirect_uri,
-            "scope": "offline read:recovery read:sleep read:cycles read:workout",
+            "scope": "offline read:recovery read:sleep read:cycles read:workout read:profile read:body_measurement",
             "state": state,
         }
         return f"{self.settings.whoop_oauth_authorize_url}?{urlencode(params)}"
@@ -386,6 +400,9 @@ class WhoopClient:
                 aggregated_days.append(payload)
             current_day += timedelta(days=1)
 
+        if self._should_rollup_weekly(start_day, end_day):
+            aggregated_days = self._aggregate_cycle_days_weekly(aggregated_days)
+
         start_index = 0
         if next_token:
             for index, item in enumerate(aggregated_days):
@@ -442,6 +459,52 @@ class WhoopClient:
             "workouts": workouts,
             "next_token": self._extract_next_token(payload),
         }
+
+    async def fetch_body_measurements(self, profile_name: str) -> BodyMeasurementResult:
+        access_token = await self._ensure_access_token(profile_name=profile_name)
+        response = await self._raw_get(
+            profile_name=profile_name,
+            path="/v2/user/measurement/body",
+            access_token=access_token,
+            params={},
+        )
+
+        if response.status_code == 401:
+            refreshed_token = await self._ensure_access_token(profile_name=profile_name, force_refresh=True)
+            response = await self._raw_get(
+                profile_name=profile_name,
+                path="/v2/user/measurement/body",
+                access_token=refreshed_token,
+                params={},
+            )
+
+        if response.status_code == 404:
+            return {
+                "status": "pending",
+                "reason": "Body measurements are not available yet.",
+            }
+        if response.status_code == 401:
+            raise ReauthorizationRequiredError("Reauthorization required")
+        if response.status_code >= 500:
+            raise WhoopUnavailableError("Whoop API unavailable")
+        if response.status_code >= 300:
+            raise UnexpectedWhoopResponseError(f"Unexpected Whoop status code: {response.status_code}")
+
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise UnexpectedWhoopResponseError("Invalid Whoop response JSON") from exc
+
+        if not isinstance(payload, dict):
+            raise UnexpectedWhoopResponseError("Unexpected Whoop response")
+
+        mapped = self._map_body_measurements(payload)
+        if mapped is None:
+            return {
+                "status": "pending",
+                "reason": "Body measurements are not available yet.",
+            }
+        return {"status": "ready", **mapped}
 
     async def _ensure_access_token(self, profile_name: str, force_refresh: bool = False) -> str:
         async with self._token_lock:
@@ -1294,11 +1357,153 @@ class WhoopClient:
                 return value.strip().lower()
         return "unknown"
 
+    def _map_body_measurements(self, payload: dict[str, Any]) -> dict[str, Any] | None:
+        blocks: list[dict[str, Any]] = [payload]
+        for key in ("body_measurement", "body", "measurement"):
+            value = payload.get(key)
+            if isinstance(value, dict):
+                blocks.append(value)
+
+        height_meter = self._first_number_from_blocks(
+            blocks,
+            ["height_meter", "height_meters", "height"],
+        )
+        weight_kilogram = self._first_number_from_blocks(
+            blocks,
+            ["weight_kilogram", "weight_kilograms", "weight_kg", "weight"],
+        )
+        max_heart_rate = self._first_number_from_blocks(
+            blocks,
+            ["max_heart_rate", "maximum_heart_rate"],
+        )
+
+        if height_meter is None and weight_kilogram is None and max_heart_rate is None:
+            return None
+
+        measured_at_raw = self._first_string_from_blocks(
+            blocks,
+            ["measured_at", "updated_at", "created_at"],
+        )
+        measured_at = self._to_zulu(datetime.now(timezone.utc))
+        if measured_at_raw:
+            parsed = self._parse_datetime(measured_at_raw)
+            if parsed is not None:
+                measured_at = self._to_zulu(parsed)
+            else:
+                measured_at = measured_at_raw
+
+        mapped: dict[str, Any] = {"measured_at": measured_at}
+        if height_meter is not None:
+            mapped["height_meter"] = round(height_meter, 4)
+        if weight_kilogram is not None:
+            mapped["weight_kilogram"] = round(weight_kilogram, 4)
+        if max_heart_rate is not None:
+            mapped["max_heart_rate"] = int(round(max_heart_rate))
+        return mapped
+
+    @staticmethod
+    def _should_rollup_weekly(start_day: date, end_day: date) -> bool:
+        return ((end_day - start_day).days + 1) > 14
+
+    @staticmethod
+    def _week_start(target_day: date) -> date:
+        return target_day - timedelta(days=target_day.weekday())
+
+    def _aggregate_cycle_days_weekly(self, days: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if not days:
+            return []
+
+        buckets: dict[date, list[dict[str, Any]]] = {}
+        for item in days:
+            date_raw = item.get("date")
+            if not isinstance(date_raw, str):
+                continue
+            try:
+                target_day = date.fromisoformat(date_raw)
+            except ValueError:
+                continue
+            week_start = self._week_start(target_day)
+            buckets.setdefault(week_start, []).append(item)
+
+        aggregated: list[dict[str, Any]] = []
+        for week_start in sorted(buckets.keys()):
+            bucket = buckets[week_start]
+            payload: dict[str, Any] = {"date": week_start.isoformat()}
+            self._assign_avg_int(payload, bucket, "recovery_score")
+            if "recovery_score" in payload:
+                payload["recovery_zone"] = self._zone_from_score(int(payload["recovery_score"]))
+            self._assign_avg_int(payload, bucket, "hrv_ms")
+            self._assign_avg_int(payload, bucket, "resting_hr_bpm")
+            self._assign_avg_float(payload, bucket, "spo2_percentage", 1)
+            self._assign_avg_float(payload, bucket, "skin_temp_celsius", 1)
+            self._assign_avg_float(payload, bucket, "strain_score", 1)
+            self._assign_avg_int(payload, bucket, "kilojoules")
+            self._assign_avg_int(payload, bucket, "sleep_score")
+            self._assign_avg_float(payload, bucket, "sleep_hours", 1)
+            self._assign_avg_int(payload, bucket, "sleep_disturbance_count")
+            self._assign_avg_int(payload, bucket, "sleep_consistency_percentage")
+            self._assign_avg_int(payload, bucket, "sleep_efficiency_percentage")
+            aggregated.append(payload)
+        return aggregated
+
+    @staticmethod
+    def _assign_avg_int(target: dict[str, Any], rows: list[dict[str, Any]], field: str) -> None:
+        values: list[float] = []
+        for row in rows:
+            raw = row.get(field)
+            try:
+                if raw is None:
+                    continue
+                values.append(float(raw))
+            except (TypeError, ValueError):
+                continue
+        if values:
+            target[field] = int(round(sum(values) / len(values)))
+
+    @staticmethod
+    def _assign_avg_float(target: dict[str, Any], rows: list[dict[str, Any]], field: str, digits: int) -> None:
+        values: list[float] = []
+        for row in rows:
+            raw = row.get(field)
+            try:
+                if raw is None:
+                    continue
+                values.append(float(raw))
+            except (TypeError, ValueError):
+                continue
+        if values:
+            target[field] = round(sum(values) / len(values), digits)
+
+    @staticmethod
+    def _zone_from_score(score: int) -> Literal["green", "yellow", "red"]:
+        if score >= 67:
+            return "green"
+        if score >= 34:
+            return "yellow"
+        return "red"
+
     @staticmethod
     def _normalize_duration_hours(value: float) -> float:
         if abs(value) > 1000:
             return round(value / 3_600_000, 1)
         return round(value, 1)
+
+    @staticmethod
+    def _first_number_from_blocks(blocks: list[dict[str, Any]], keys: list[str]) -> float | None:
+        for block in blocks:
+            value = WhoopClient._first_number(block, keys)
+            if value is not None:
+                return value
+        return None
+
+    @staticmethod
+    def _first_string_from_blocks(blocks: list[dict[str, Any]], keys: list[str]) -> str | None:
+        for block in blocks:
+            for key in keys:
+                value = block.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+        return None
 
     @staticmethod
     def _first_number(source: dict[str, Any], keys: list[str]) -> float | None:

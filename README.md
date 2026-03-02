@@ -20,6 +20,10 @@ Technical design:
 - Token persistence in `/secrets/whoop_tokens.json` with auto refresh per profile
 - File cache in `/cache/<profile>/...` (only `ready` responses)
 - Range cache for collection endpoints (`/cycles`, `/workouts`) with TTL
+- Body measurements snapshot endpoint (`/measurements/body`)
+- Synthetic body measurements history (`/measurements/body/history`) from local snapshots
+- Range validation for collection routes with max depth 365 days
+- Weekly rollup for long ranges (`>14` days) on `/cycles` and `/measurements/body/history`
 - Daily cache cleanup on startup and at 03:00 MSK
 - Local smoke tests, unit tests, and gated live integration tests
 
@@ -32,8 +36,12 @@ Protected routes (require `X-API-Key`):
 - `GET /week`
 - `GET /cycles?start=...&end=...&limit=...&next_token=...`
 - `GET /workouts?start=...&end=...&limit=...&next_token=...`
+- `GET /measurements/body`
+- `GET /measurements/body/history?start=...&end=...&limit=...&next_token=...`
 
 Collection routes (`/cycles`, `/workouts`) use `next_token` (snake_case).
+Range routes (`/cycles`, `/workouts`, `/measurements/body/history`) enforce max depth `365` days.
+For `/cycles` and `/measurements/body/history`, ranges longer than 14 days are downsampled to weekly averages.
 
 ## Error Semantics
 
@@ -72,6 +80,20 @@ Workouts:
 
 ```bash
 curl -sS "${WHOOP_SERVICE_BASE_URL}/workouts?start=2026-02-01T00:00:00%2B03:00&end=2026-03-02T00:00:00%2B03:00&limit=10" \
+  -H "X-API-Key: ${WHOOP_SERVICE_TOKEN}"
+```
+
+Body measurements snapshot:
+
+```bash
+curl -sS "${WHOOP_SERVICE_BASE_URL}/measurements/body" \
+  -H "X-API-Key: ${WHOOP_SERVICE_TOKEN}"
+```
+
+Body measurements history:
+
+```bash
+curl -sS "${WHOOP_SERVICE_BASE_URL}/measurements/body/history?start=2026-02-01T00:00:00%2B03:00&end=2026-03-02T00:00:00%2B03:00&limit=10" \
   -H "X-API-Key: ${WHOOP_SERVICE_TOKEN}"
 ```
 

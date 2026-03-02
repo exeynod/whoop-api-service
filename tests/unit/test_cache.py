@@ -97,3 +97,50 @@ def test_cleanup_deletes_expired_range_cache_files(tmp_path):
     deleted = cache.cleanup_expired(today=date(2026, 2, 27))
     assert deleted >= 1
     assert not cache_file.exists()
+
+
+@pytest.mark.unit
+def test_save_body_snapshot_and_load_history(tmp_path):
+    cache = FileCache(cache_dir=tmp_path, timezone_name="Europe/Moscow", retention_days=30)
+    snapshot_date = date(2026, 3, 2)
+    payload = {
+        "status": "ready",
+        "measured_at": "2026-03-02T12:10:59Z",
+        "height_meter": 1.8288,
+        "weight_kilogram": 90.7185,
+        "max_heart_rate": 200,
+    }
+
+    assert cache.save_body_snapshot("denis", snapshot_date, payload) is True
+    history = cache.load_body_history("denis", date(2026, 3, 1), date(2026, 3, 3))
+
+    assert history == [
+        {
+            "date": "2026-03-02",
+            "measured_at": "2026-03-02T12:10:59Z",
+            "height_meter": 1.8288,
+            "weight_kilogram": 90.7185,
+            "max_heart_rate": 200,
+        }
+    ]
+
+
+@pytest.mark.unit
+def test_cleanup_uses_365_day_retention_for_body_measurements(tmp_path):
+    cache = FileCache(cache_dir=tmp_path, timezone_name="Europe/Moscow", retention_days=30)
+    profile_dir = tmp_path / "denis"
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    old_body = profile_dir / "body_measurement_2025-03-01.json"
+    fresh_body = profile_dir / "body_measurement_2025-03-03.json"
+    old_recovery = profile_dir / "recovery_2026-01-01.json"
+
+    old_body.write_text('{"status":"ready"}', encoding="utf-8")
+    fresh_body.write_text('{"status":"ready"}', encoding="utf-8")
+    old_recovery.write_text('{"status":"ready"}', encoding="utf-8")
+
+    deleted = cache.cleanup_expired(today=date(2026, 3, 2))
+
+    assert deleted == 2
+    assert not old_body.exists()
+    assert fresh_body.exists()
+    assert not old_recovery.exists()
