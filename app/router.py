@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from typing import Union
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends
@@ -31,7 +32,7 @@ def _whoop_error_response(exc: Exception) -> JSONResponse:
         payload = ErrorResponse(reason="Reauthorization required")
         return JSONResponse(status_code=502, content=payload.model_dump(exclude_none=True))
     if isinstance(exc, WhoopTimeoutError):
-        payload = ErrorResponse(reason="Whoop API timeout")
+        payload = ErrorResponse(reason="Whoop API timeout", detail=str(exc))
         return JSONResponse(status_code=502, content=payload.model_dump(exclude_none=True))
     if isinstance(exc, WhoopUnavailableError):
         payload = ErrorResponse(reason="Whoop API unavailable")
@@ -45,7 +46,7 @@ def _whoop_error_response(exc: Exception) -> JSONResponse:
 
 @router.get(
     "/recovery/today",
-    response_model=RecoveryReadyResponse | PendingResponse,
+    response_model=Union[RecoveryReadyResponse, PendingResponse],
     responses={502: {"model": ErrorResponse}},
 )
 async def recovery_today(
@@ -66,11 +67,6 @@ async def recovery_today(
     throttled_pending = rate_limiter.get_pending_if_limited("recovery_today", now)
     if throttled_pending:
         return throttled_pending
-
-    if not rate_limiter.should_call("recovery_today", now):
-        return PendingResponse(
-            reason="Sleep not yet complete. Recovery will be available after wake."
-        ).model_dump()
 
     try:
         payload = await whoop_client.fetch_recovery(today)

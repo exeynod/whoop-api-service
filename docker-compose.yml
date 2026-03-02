@@ -12,9 +12,8 @@ services:
       - ./secrets:/secrets
     networks:
       - openclaw_internal
-    # Для первичной OAuth-авторизации временно откройте порт:
-    # ports:
-    #   - "8001:8001"
+    # Service is internal-only. Do not publish ports on VPS.
+    # OpenClaw should call http://whoop-service:8001 inside Docker network.
 
 networks:
   openclaw_internal:
