@@ -20,6 +20,10 @@ Copy `.env.example` to `.env` and set values:
 - `WHOOP_CLIENT_SECRET`
 - `WHOOP_REDIRECT_URI`
 - `TZ=Europe/Moscow`
+- `WHOOP_HTTP_LOG_ENABLED=true`
+- `WHOOP_HTTP_LOG_LEVEL=INFO`
+- `WHOOP_HTTP_LOG_BODY_MAX_CHARS=4000`
+- `WHOOP_HTTP_LOG_REDACT_SENSITIVE=true`
 
 ## Local Run
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal, TypedDict, Union
@@ -84,6 +85,11 @@ class WhoopClient:
         self.settings = settings
         self._tz = ZoneInfo(settings.timezone)
         self._token_lock = asyncio.Lock()
+        self._logger = logging.getLogger("app.whoop_client")
+        self._http_log_enabled = settings.whoop_http_log_enabled
+        self._http_log_redact_sensitive = settings.whoop_http_log_redact_sensitive
+        self._http_log_body_max_chars = max(200, settings.whoop_http_log_body_max_chars)
+        self._http_log_level = self._resolve_log_level(settings.whoop_http_log_level)
         self.settings.secrets_dir.mkdir(parents=True, exist_ok=True)
 
     @property
@@ -120,11 +126,27 @@ class WhoopClient:
 
     async def ping(self, timeout_seconds: float) -> bool:
         url = f"{self.settings.whoop_api_base_url.rstrip('/')}/v2/user/profile/basic"
+        headers: dict[str, str] = {}
+        self._log_http_request(channel="whoop_data_ping", method="GET", url=url, headers=headers)
         try:
             async with httpx.AsyncClient(timeout=timeout_seconds) as client:
-                await client.get(url)
+                response = await client.get(url)
+            self._log_http_response(
+                channel="whoop_data_ping",
+                method="GET",
+                url=url,
+                status_code=response.status_code,
+                headers=dict(response.headers),
+                body_text=response.text,
+            )
             return True
         except (httpx.RequestError, httpx.TimeoutException):
+            self._log_http_error(
+                channel="whoop_data_ping",
+                method="GET",
+                url=url,
+                error="RequestError or TimeoutException",
+            )
             return False
 
     async def fetch_recovery(self, target_date: date) -> RecoveryResult:
@@ -258,6 +280,7 @@ class WhoopClient:
             "refresh_token": tokens.refresh_token,
             "client_id": self.settings.whoop_client_id,
             "client_secret": self.settings.whoop_client_secret,
+            "redirect_uri": self.settings.whoop_redirect_uri,
         }
 
         response = await self._oauth_post(token_payload)
@@ -267,6 +290,13 @@ class WhoopClient:
 
     async def _oauth_post(self, payload: dict[str, Any]) -> dict[str, Any]:
         timeout = httpx.Timeout(self.settings.whoop_timeout_seconds)
+        self._log_http_request(
+            channel="whoop_oauth",
+            method="POST",
+            url=self.settings.whoop_oauth_token_url,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            data=payload,
+        )
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 response = await client.post(
@@ -275,9 +305,30 @@ class WhoopClient:
                     headers={"Content-Type": "application/x-www-form-urlencoded"},
                 )
         except httpx.TimeoutException as exc:
+            self._log_http_error(
+                channel="whoop_oauth",
+                method="POST",
+                url=self.settings.whoop_oauth_token_url,
+                error=f"TimeoutException: {exc}",
+            )
             raise WhoopTimeoutError("Connection timeout after 10s") from exc
         except httpx.RequestError as exc:
+            self._log_http_error(
+                channel="whoop_oauth",
+                method="POST",
+                url=self.settings.whoop_oauth_token_url,
+                error=f"RequestError: {exc}",
+            )
             raise WhoopUnavailableError("Unable to reach Whoop OAuth endpoint") from exc
+
+        self._log_http_response(
+            channel="whoop_oauth",
+            method="POST",
+            url=self.settings.whoop_oauth_token_url,
+            status_code=response.status_code,
+            headers=dict(response.headers),
+            body_text=response.text,
+        )
 
         if response.status_code in (400, 401):
             raise ReauthorizationRequiredError("Reauthorization required")
@@ -349,13 +400,42 @@ class WhoopClient:
         timeout = httpx.Timeout(self.settings.whoop_timeout_seconds)
         url = f"{self.settings.whoop_api_base_url.rstrip('/')}{path}"
         headers = {"Authorization": f"Bearer {access_token}"}
+        self._log_http_request(
+            channel="whoop_data",
+            method="GET",
+            url=url,
+            headers=headers,
+            params=params,
+        )
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
-                return await client.get(url, params=params, headers=headers)
+                response = await client.get(url, params=params, headers=headers)
         except httpx.TimeoutException as exc:
+            self._log_http_error(
+                channel="whoop_data",
+                method="GET",
+                url=url,
+                error=f"TimeoutException: {exc}",
+            )
             raise WhoopTimeoutError("Connection timeout after 10s") from exc
         except httpx.RequestError as exc:
+            self._log_http_error(
+                channel="whoop_data",
+                method="GET",
+                url=url,
+                error=f"RequestError: {exc}",
+            )
             raise WhoopUnavailableError("Whoop API unavailable") from exc
+
+        self._log_http_response(
+            channel="whoop_data",
+            method="GET",
+            url=url,
+            status_code=response.status_code,
+            headers=dict(response.headers),
+            body_text=response.text,
+        )
+        return response
 
     def _bundle_from_oauth_response(
         self,
@@ -619,3 +699,113 @@ class WhoopClient:
             return float(value)
         except (TypeError, ValueError) as exc:
             raise UnexpectedWhoopResponseError(f"Invalid numeric field: {field_name}") from exc
+
+    def _log_http_request(
+        self,
+        channel: str,
+        method: str,
+        url: str,
+        headers: dict[str, str] | None = None,
+        params: dict[str, str] | None = None,
+        data: dict[str, Any] | None = None,
+    ) -> None:
+        self._log_http_event(
+            event={
+                "event": "whoop_http_request",
+                "channel": channel,
+                "method": method,
+                "url": url,
+                "headers": self._sanitize_mapping(headers or {}),
+                "params": self._sanitize_mapping(params or {}),
+                "data": self._sanitize_mapping(data or {}),
+            }
+        )
+
+    def _log_http_response(
+        self,
+        channel: str,
+        method: str,
+        url: str,
+        status_code: int,
+        headers: dict[str, str] | None,
+        body_text: str,
+    ) -> None:
+        body = self._sanitize_response_body(body_text)
+        self._log_http_event(
+            event={
+                "event": "whoop_http_response",
+                "channel": channel,
+                "method": method,
+                "url": url,
+                "status_code": status_code,
+                "headers": self._sanitize_mapping(headers or {}),
+                "body": body,
+                "body_truncated": len(body_text) > self._http_log_body_max_chars,
+            }
+        )
+
+    def _log_http_error(self, channel: str, method: str, url: str, error: str) -> None:
+        self._log_http_event(
+            event={
+                "event": "whoop_http_error",
+                "channel": channel,
+                "method": method,
+                "url": url,
+                "error": error,
+            }
+        )
+
+    def _log_http_event(self, event: dict[str, Any]) -> None:
+        if not self._http_log_enabled:
+            return
+        self._logger.log(self._http_log_level, json.dumps(event, ensure_ascii=True, default=str))
+
+    def _sanitize_mapping(self, mapping: dict[str, Any]) -> dict[str, Any]:
+        if not self._http_log_redact_sensitive:
+            return dict(mapping)
+
+        masked: dict[str, Any] = {}
+        for key, value in mapping.items():
+            lower_key = key.lower()
+            if lower_key in {
+                "authorization",
+                "client_secret",
+                "refresh_token",
+                "access_token",
+                "code",
+            }:
+                masked[key] = self._mask_value(value)
+            elif lower_key == "client_id":
+                masked[key] = self._mask_value(value)
+            else:
+                masked[key] = value
+        return masked
+
+    def _sanitize_response_body(self, body_text: str) -> str:
+        truncated = body_text[: self._http_log_body_max_chars]
+        if not self._http_log_redact_sensitive:
+            return truncated
+
+        try:
+            payload = json.loads(truncated)
+        except ValueError:
+            return truncated
+
+        if isinstance(payload, dict):
+            sanitized_payload = self._sanitize_mapping(payload)
+            return json.dumps(sanitized_payload, ensure_ascii=True)
+        return truncated
+
+    @staticmethod
+    def _mask_value(value: Any) -> str:
+        if value is None:
+            return ""
+        raw = str(value)
+        if len(raw) <= 8:
+            return "***"
+        return f"{raw[:4]}***{raw[-4:]}"
+
+    @staticmethod
+    def _resolve_log_level(raw_level: str) -> int:
+        normalized = (raw_level or "INFO").upper().strip()
+        return getattr(logging, normalized, logging.INFO)

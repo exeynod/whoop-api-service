@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import date, datetime, timedelta, timezone
 from urllib.parse import parse_qs, urlparse
 
@@ -280,6 +281,45 @@ async def test_ping_returns_true_when_upstream_responds_even_unauthorized():
             json={"message": "Unauthorized"},
         )
         assert await client.ping(timeout_seconds=1.0) is True
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_whoop_http_logging_contains_request_and_response_events(caplog: pytest.LogCaptureFixture):
+    settings = get_settings()
+    client = WhoopClient(settings)
+
+    caplog.set_level(logging.INFO, logger="app.whoop_client")
+    with respx.mock(assert_all_called=True) as mock:
+        mock.post(settings.whoop_oauth_token_url).respond(
+            200,
+            json={
+                "access_token": "new-access-token",
+                "refresh_token": "new-refresh-token",
+                "expires_in": 3600,
+            },
+        )
+        await client.exchange_code_for_tokens("auth-code-123")
+
+    events = [json.loads(record.message) for record in caplog.records if record.name == "app.whoop_client"]
+    event_types = [event.get("event") for event in events]
+    assert "whoop_http_request" in event_types
+    assert "whoop_http_response" in event_types
+
+    request_event = next(event for event in events if event.get("event") == "whoop_http_request")
+    response_event = next(event for event in events if event.get("event") == "whoop_http_response")
+
+    assert request_event["channel"] == "whoop_oauth"
+    assert request_event["method"] == "POST"
+    assert "client_secret" in request_event["data"]
+    assert request_event["data"]["client_secret"].startswith("clie***")
+    assert request_event["data"]["code"].startswith("auth***")
+
+    assert response_event["channel"] == "whoop_oauth"
+    assert response_event["status_code"] == 200
+    assert response_event["body_truncated"] is False
+    assert "access_token" in response_event["body"]
+    assert "new-access-token" not in response_event["body"]
 
 
 @pytest.mark.unit

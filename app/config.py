@@ -38,6 +38,13 @@ class Settings(BaseSettings):
     health_timeout_seconds: float = Field(default=3.0, alias="HEALTH_TIMEOUT_SECONDS")
     whoop_min_interval_seconds: int = Field(default=300, alias="WHOOP_MIN_INTERVAL_SECONDS")
     cache_retention_days: int = Field(default=30, alias="CACHE_RETENTION_DAYS")
+    whoop_http_log_enabled: bool = Field(default=True, alias="WHOOP_HTTP_LOG_ENABLED")
+    whoop_http_log_level: str = Field(default="INFO", alias="WHOOP_HTTP_LOG_LEVEL")
+    whoop_http_log_body_max_chars: int = Field(default=4000, alias="WHOOP_HTTP_LOG_BODY_MAX_CHARS")
+    whoop_http_log_redact_sensitive: bool = Field(
+        default=True,
+        alias="WHOOP_HTTP_LOG_REDACT_SENSITIVE",
+    )
 
     model_config = SettingsConfigDict(
         env_file=".env",
