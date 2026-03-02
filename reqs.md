@@ -33,7 +33,7 @@ Whoop Service — автономный микросервис, часть сис
 OAuth2 Authorization Code Flow.
 `access_token` и `refresh_token` хранятся в `/secrets/whoop_tokens.json`.
 Сервис автоматически обновляет `access_token` через `refresh_token` при истечении.
-Если `refresh_token` протух — все эндпоинты данных возвращают `502` с `reason: "Reauthorization required"`.
+Если `refresh_token` протух или Whoop возвращает `401` после refresh+retry — все эндпоинты данных возвращают `401` с `reason: "Reauthorization required"`.
 Требуется ручное переподключение через `/auth/init`.
 
 Credentials (`client_id`, `client_secret`) — из `.env`.
@@ -62,6 +62,9 @@ Credentials (`client_id`, `client_secret`) — из `.env`.
 - Все последующие запросы за тот же день — читаются из кэша без обращения к Whoop API
 - Данные за прошлые дни (`/day/yesterday`, `/week`) — кэшируются навсегда (ретроспективные данные не меняются)
 - `/week` использует пообъектный кэш: каждый из 7 дней кэшируется отдельным файлом. При запросе сервис собирает ответ из кэша, запрашивая у Whoop только те дни, которых нет в кэше
+- `/cycles` и `/workouts` используют range-кэш по ключу `start|end|limit|next_token` с TTL:
+  - `RANGE_READY_TTL_SECONDS` (по умолчанию `43200`)
+  - `RANGE_PENDING_TTL_SECONDS` зарезервирован (по умолчанию `300`)
 
 ### Очистка кэша
 Файлы старше 30 дней удаляются по двум триггерам:
@@ -92,7 +95,7 @@ Credentials (`client_id`, `client_secret`) — из `.env`.
 | Данные успешно получены | `200` | `ready` | |
 | Сон ещё не завершён | `200` | `pending` | Агент делает retry позже |
 | Whoop API недоступен / таймаут | `502` | `error` | |
-| Refresh token протух | `502` | `error` | `reason: "Reauthorization required"` |
+| Refresh token протух / reauth required | `401` | `error` | `reason: "Reauthorization required"` |
 | Невалидный API Key | `401` | — | |
 | Whoop вернул неожиданный формат | `502` | `error` | `reason: "Unexpected Whoop response"` |
 
@@ -163,6 +166,10 @@ Recovery текущего дня по MSK.
   "recovery_zone": "yellow",
   "hrv_ms": 52,
   "resting_hr_bpm": 48,
+  "spo2_percentage": 96.5,
+  "skin_temp_celsius": 33.8,
+  "user_calibrating": false,
+  "timezone_offset": "+03:00",
   "cached": true
 }
 ```
@@ -184,6 +191,14 @@ Recovery текущего дня по MSK.
   "status": "error",
   "reason": "Whoop API unavailable",
   "detail": "Connection timeout after 10s"
+}
+```
+
+**Response `401`:**
+```json
+{
+  "status": "error",
+  "reason": "Reauthorization required"
 }
 ```
 
@@ -210,6 +225,13 @@ Recovery текущего дня по MSK.
     "total_hours": 7.4,
     "performance_percent": 88,
     "respiratory_rate": 15.2,
+    "disturbance_count": 3,
+    "sleep_cycle_count": 5,
+    "consistency_percentage": 92,
+    "efficiency_percentage": 89,
+    "sleep_needed_hours": 7.5,
+    "sleep_debt_hours": 0.2,
+    "strain_related_need_hours": 0.5,
     "stages": {
       "deep_hours": 1.6,
       "rem_hours": 1.9,
@@ -217,11 +239,13 @@ Recovery текущего дня по MSK.
       "awake_hours": 0.7
     }
   },
+  "timezone_offset": "+03:00",
   "cached": false
 }
 ```
 
 **Response `502`** — аналогично `/recovery/today`.
+**Response `401`** — `{"status":"error","reason":"Reauthorization required"}`.
 
 ---
 
@@ -265,6 +289,107 @@ Recovery текущего дня по MSK.
 
 ---
 
+### `GET /cycles`
+
+История физиологических циклов за произвольный диапазон (MSK), с локальной пагинацией по дням.
+
+Query:
+- `start` (required, ISO8601 datetime с timezone)
+- `end` (optional, ISO8601 datetime с timezone, default = `now`)
+- `limit` (optional, `1..25`, default `10`)
+- `next_token` (optional, `YYYY-MM-DD`)
+
+**Response `200`:**
+```json
+{
+  "status": "ready",
+  "period": {
+    "from": "2026-02-01",
+    "to": "2026-03-02"
+  },
+  "days": [
+    {
+      "date": "2026-03-01",
+      "cycle_id": 1339692348,
+      "recovery_score": 70,
+      "recovery_zone": "yellow",
+      "hrv_ms": 101,
+      "resting_hr_bpm": 49,
+      "spo2_percentage": 96.5,
+      "skin_temp_celsius": 33.6,
+      "strain_score": 15.6,
+      "kilojoules": 1823,
+      "sleep_score": 72,
+      "sleep_hours": 5.0,
+      "sleep_disturbance_count": 3,
+      "sleep_consistency_percentage": 89,
+      "sleep_efficiency_percentage": 84
+    }
+  ],
+  "next_token": "2026-03-02",
+  "timezone_offset": "+03:00",
+  "cached": false
+}
+```
+
+Примечания:
+- отсутствующие метрики из Whoop пропускаются (не возвращаются как `null`);
+- `next_token` используется только в snake_case.
+
+---
+
+### `GET /workouts`
+
+Тренировки за диапазон дат с деталями спорта и зонами интенсивности.
+
+Query:
+- `start` (required, ISO8601 datetime с timezone)
+- `end` (optional, ISO8601 datetime с timezone, default = `now`)
+- `limit` (optional, `1..25`, default `10`)
+- `next_token` (optional, passthrough токен Whoop)
+
+**Response `200`:**
+```json
+{
+  "status": "ready",
+  "period": {
+    "from": "2026-02-01",
+    "to": "2026-03-02"
+  },
+  "workouts": [
+    {
+      "workout_id": "w1",
+      "date": "2026-03-01",
+      "sport_name": "hockey",
+      "start": "2026-03-01T15:00:00Z",
+      "end": "2026-03-01T17:00:00Z",
+      "strain_score": 12.4,
+      "kilojoules": 1823,
+      "average_hr_bpm": 112,
+      "max_hr_bpm": 171,
+      "distance_meter": 1772.77,
+      "altitude_gain_meter": 46.64,
+      "percent_recorded": 100,
+      "zone_durations": {
+        "zone_zero_milli": 300000,
+        "zone_one_milli": 600000,
+        "zone_two_milli": 900000,
+        "zone_three_milli": 900000,
+        "zone_four_milli": 600000,
+        "zone_five_milli": 300000
+      }
+    }
+  ],
+  "next_token": null,
+  "timezone_offset": "+03:00",
+  "cached": false
+}
+```
+
+Примечание: `sport_name` обязателен в ответе; если отсутствует у Whoop, сервис возвращает `"unknown"`.
+
+---
+
 ## Конфигурация (.env)
 
 ```
@@ -273,6 +398,8 @@ WHOOP_CLIENT_ID=          # из Whoop Developer Portal
 WHOOP_CLIENT_SECRET=      # из Whoop Developer Portal
 WHOOP_REDIRECT_URI=       # http://<VPS_IP>:<PORT>/auth/callback
 TZ=Europe/Moscow
+RANGE_READY_TTL_SECONDS=43200
+RANGE_PENDING_TTL_SECONDS=300
 ```
 
 ---
@@ -300,7 +427,7 @@ whoop-service/
 ├── .env.example
 ├── app/
 │   ├── main.py
-│   ├── router.py          ← /recovery/today, /day/yesterday, /week
+│   ├── router.py          ← /recovery/today, /day/yesterday, /week, /cycles, /workouts
 │   ├── auth_router.py     ← /auth/init, /auth/callback
 │   ├── whoop_client.py    ← OAuth2 + запросы к Whoop API
 │   ├── cache.py           ← файловый кэш + очистка по cron

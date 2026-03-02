@@ -1,6 +1,6 @@
 ---
 name: whoop-api-service
-description: Use this skill for requests about WHOOP recovery/sleep/strain data through the local Whoop Service proxy. Trigger when user asks to fetch data from /recovery/today, /day/yesterday, /week.
+description: Use this skill for requests about WHOOP recovery/sleep/strain/workout data through the local Whoop Service proxy. Trigger when user asks to fetch data from /recovery/today, /day/yesterday, /week, /cycles, /workouts.
 metadata: {"openclaw":{"skillKey":"whoopApiService","requires":{"env":["WHOOP_SERVICE_BASE_URL","WHOOP_SERVICE_TOKEN"]},"primaryEnv":"WHOOP_SERVICE_TOKEN"}}
 ---
 
@@ -29,6 +29,10 @@ Trigger words and phrases (Russian):
 - `нагрузка за неделю`
 - `strain за вчера`
 - `sleep за вчера`
+- `история циклов whoop`
+- `циклы за месяц`
+- `тренировки whoop`
+- `workouts за период`
 - `recovery sleep strain`
 
 ## Route Map
@@ -38,6 +42,8 @@ Protected routes (must send `X-API-Key: ${WHOOP_SERVICE_TOKEN}`):
 - `GET /recovery/today`
 - `GET /day/yesterday`
 - `GET /week`
+- `GET /cycles`
+- `GET /workouts`
 
 ## Call Rules
 
@@ -46,19 +52,28 @@ Protected routes (must send `X-API-Key: ${WHOOP_SERVICE_TOKEN}`):
 - Always call endpoints via `${WHOOP_SERVICE_BASE_URL}`; never hardcode `127.0.0.1` or any fixed host.
 - For protected routes always send header `X-API-Key`.
 - Do not send JSON body for these `GET` endpoints.
+- For collection pagination use only `next_token` (snake_case).
+- For `/cycles` and `/workouts`, `start` is required and must include timezone offset (ISO8601 datetime).
+- For `/cycles`, `next_token` (if present) must be `YYYY-MM-DD`.
+- For `/cycles` and `/workouts`, keep `limit` in `1..25` (default `10`).
 
 ## Response Contracts
 
 - `/recovery/today`:
   - `200 pending`: `{"status":"pending","reason":"..."}`
-  - `200 ready`: `{"status":"ready","date":"YYYY-MM-DD","recovery_score":0-100,"recovery_zone":"green|yellow|red","hrv_ms":<int>,"resting_hr_bpm":<int>,"cached":<bool>}`
+  - `200 ready`: `{"status":"ready","date":"YYYY-MM-DD","recovery_score":0-100,"recovery_zone":"green|yellow|red","hrv_ms":<int>,"resting_hr_bpm":<int>,"spo2_percentage"?:<float>,"skin_temp_celsius"?:<float>,"user_calibrating"?:<bool>,"timezone_offset":"+03:00","cached":<bool>}`
 - `/day/yesterday`:
-  - `200 ready`: `{"status":"ready","date":"YYYY-MM-DD","strain":{...},"sleep":{...},"cached":<bool>}`
+  - `200 ready`: `{"status":"ready","date":"YYYY-MM-DD","strain":{...},"sleep":{"disturbance_count"?:<int>,"sleep_cycle_count"?:<int>,"consistency_percentage"?:<int>,"efficiency_percentage"?:<int>,"sleep_needed_hours"?:<float>,"sleep_debt_hours"?:<float>,"strain_related_need_hours"?:<float>,...},"timezone_offset":"+03:00","cached":<bool>}`
 - `/week`:
   - `200`: `{"period":{"from":"YYYY-MM-DD","to":"YYYY-MM-DD"},"days":[{"status":"ready"| "missing", ...}]}`
+- `/cycles`:
+  - `200 ready`: `{"status":"ready","period":{"from":"YYYY-MM-DD","to":"YYYY-MM-DD"},"days":[...],"next_token":<string|null>,"timezone_offset":"+03:00","cached":<bool>}`
+- `/workouts`:
+  - `200 ready`: `{"status":"ready","period":{"from":"YYYY-MM-DD","to":"YYYY-MM-DD"},"workouts":[{"sport_name":"...","zone_durations"?:{...},...}],"next_token":<string|null>,"timezone_offset":"+03:00","cached":<bool>}`
 - Errors:
-  - `401`: invalid/missing API key
-  - `502`: upstream WHOOP issues or reauthorization required, payload `{"status":"error","reason":"...","detail":"..."?}`
+  - `401`: invalid/missing API key (`{"detail":"Unauthorized"}`)
+  - `401`: reauthorization required (`{"status":"error","reason":"Reauthorization required"}`)
+  - `502`: upstream WHOOP timeout/unavailable or unexpected payload, payload `{"status":"error","reason":"...","detail":"..."?}`
 
 ## Behavior Notes (Important)
 
@@ -72,6 +87,10 @@ Protected routes (must send `X-API-Key: ${WHOOP_SERVICE_TOKEN}`):
 - `/week`:
   - returns 7-day window from `yesterday-6` to `yesterday`;
   - can include mix of `ready` and `missing` days.
+- `/cycles`, `/workouts`:
+  - support `start`, `end`, `limit`, `next_token`;
+  - return `ready` with `cached` flag and `timezone_offset`;
+  - use range-cache (TTL by service config).
 
 ## Curl Templates
 
@@ -92,6 +111,10 @@ Example response (`ready`):
   "recovery_zone": "yellow",
   "hrv_ms": 52,
   "resting_hr_bpm": 48,
+  "spo2_percentage": 96.5,
+  "skin_temp_celsius": 33.8,
+  "user_calibrating": false,
+  "timezone_offset": "+03:00",
   "cached": false
 }
 ```
@@ -129,6 +152,13 @@ Example response:
     "total_hours": 7.4,
     "performance_percent": 88,
     "respiratory_rate": 15.2,
+    "disturbance_count": 3,
+    "sleep_cycle_count": 5,
+    "consistency_percentage": 92,
+    "efficiency_percentage": 89,
+    "sleep_needed_hours": 7.5,
+    "sleep_debt_hours": 0.2,
+    "strain_related_need_hours": 0.5,
     "stages": {
       "deep_hours": 1.6,
       "rem_hours": 1.9,
@@ -136,6 +166,7 @@ Example response:
       "awake_hours": 0.7
     }
   },
+  "timezone_offset": "+03:00",
   "cached": true
 }
 ```
@@ -175,9 +206,30 @@ Example response:
 }
 ```
 
+Scenario (RU request): `Покажи циклы за период` or `История циклов за месяц`
+
+```bash
+curl -sS "${WHOOP_SERVICE_BASE_URL}/cycles?start=2026-02-01T00:00:00%2B03:00&end=2026-03-02T00:00:00%2B03:00&limit=10" \
+  -H "X-API-Key: ${WHOOP_SERVICE_TOKEN}"
+```
+
+Scenario (RU request): `Покажи тренировки за период` or `Какие были workouts`
+
+```bash
+curl -sS "${WHOOP_SERVICE_BASE_URL}/workouts?start=2026-02-01T00:00:00%2B03:00&end=2026-03-02T00:00:00%2B03:00&limit=10" \
+  -H "X-API-Key: ${WHOOP_SERVICE_TOKEN}"
+```
+
+Follow-up page (only if previous response has non-null `next_token`):
+
+```bash
+curl -sS "${WHOOP_SERVICE_BASE_URL}/workouts?start=2026-02-01T00:00:00%2B03:00&end=2026-03-02T00:00:00%2B03:00&limit=10&next_token=<TOKEN_FROM_PREVIOUS_RESPONSE>" \
+  -H "X-API-Key: ${WHOOP_SERVICE_TOKEN}"
+```
+
 ## Minimal Execution Policy
 
 - Usually perform one service call per user request.
 - If user asks for a follow-up that needs additional calls, run only required next call(s).
-- If protected endpoint returns `401`, ask user to provide/verify `WHOOP_SERVICE_TOKEN`.
-- If endpoint returns `502` with reauthorization message, explicitly tell the user manual reauthorization is required and stop; do not attempt any autonomous actions.
+- If protected endpoint returns `401` with `{"detail":"Unauthorized"}`, ask user to provide/verify `WHOOP_SERVICE_TOKEN`.
+- If endpoint returns `401` with `reason="Reauthorization required"`, explicitly tell the user manual reauthorization is required and stop; do not attempt any autonomous actions.

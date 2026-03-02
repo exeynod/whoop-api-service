@@ -69,6 +69,20 @@ class WeekDayReadyResult(TypedDict):
     sleep_hours: float
 
 
+class CyclesRangeResult(TypedDict):
+    status: Literal["ready"]
+    period: dict[str, str]
+    days: list[dict[str, Any]]
+    next_token: str | None
+
+
+class WorkoutsRangeResult(TypedDict):
+    status: Literal["ready"]
+    period: dict[str, str]
+    workouts: list[dict[str, Any]]
+    next_token: str | None
+
+
 RecoveryResult = Union[RecoveryPendingResult, RecoveryReadyResult]
 WeekDayResult = Union[WeekDayMissingResult, WeekDayReadyResult]
 
@@ -140,7 +154,7 @@ class WhoopClient:
             "response_type": "code",
             "client_id": self.settings.whoop_client_id,
             "redirect_uri": self.settings.whoop_redirect_uri,
-            "scope": "offline read:recovery read:sleep read:cycles",
+            "scope": "offline read:recovery read:sleep read:cycles read:workout",
             "state": state,
         }
         return f"{self.settings.whoop_oauth_authorize_url}?{urlencode(params)}"
@@ -218,7 +232,7 @@ class WhoopClient:
             raise UnexpectedWhoopResponseError("Missing recovery score fields")
 
         recovery_score_int = int(round(float(recovery_score)))
-        return {
+        response: RecoveryReadyResult = {
             "status": "ready",
             "date": target_date.isoformat(),
             "recovery_score": recovery_score_int,
@@ -226,6 +240,29 @@ class WhoopClient:
             "hrv_ms": int(round(float(hrv_rmssd))),
             "resting_hr_bpm": int(round(float(resting_hr))),
         }
+
+        spo2 = self._first_number(score, ["spo2_percentage", "spo2"])
+        if spo2 is None:
+            spo2 = self._first_number(record, ["spo2_percentage", "spo2"])
+        if spo2 is not None:
+            response["spo2_percentage"] = round(spo2, 1)
+
+        skin_temp = self._first_number(
+            score,
+            ["skin_temp_celsius", "skin_temperature_celsius", "skin_temp"],
+        )
+        if skin_temp is None:
+            skin_temp = self._first_number(record, ["skin_temp_celsius", "skin_temperature_celsius", "skin_temp"])
+        if skin_temp is not None:
+            response["skin_temp_celsius"] = round(skin_temp, 1)
+
+        user_calibrating = self._first_bool(record, ["user_calibrating"])
+        if user_calibrating is None:
+            user_calibrating = self._first_bool(score, ["user_calibrating"])
+        if user_calibrating is not None:
+            response["user_calibrating"] = user_calibrating
+
+        return response
 
     async def fetch_yesterday_snapshot(self, profile_name: str, target_date: date) -> YesterdayResult:
         _ = await self._ensure_access_token(profile_name=profile_name)
@@ -308,6 +345,102 @@ class WhoopClient:
                 )
             ),
             "sleep_hours": self._millis_to_hours(stage_summary.get("total_in_bed_time_milli")),
+        }
+
+    async def fetch_cycles_range(
+        self,
+        profile_name: str,
+        start: datetime,
+        end: datetime,
+        limit: int,
+        next_token: str | None,
+    ) -> CyclesRangeResult:
+        _ = await self._ensure_access_token(profile_name=profile_name)
+        start_utc = start.astimezone(timezone.utc)
+        end_utc = end.astimezone(timezone.utc)
+
+        cycle_records, recovery_records, sleep_records = await asyncio.gather(
+            self._fetch_collection_all(profile_name, "/v2/cycle", start_utc, end_utc),
+            self._fetch_collection_all(profile_name, "/v2/recovery", start_utc, end_utc),
+            self._fetch_collection_all(profile_name, "/v2/activity/sleep", start_utc, end_utc),
+        )
+
+        start_day = start.astimezone(self._tz).date()
+        end_day = end.astimezone(self._tz).date()
+        aggregated_days: list[dict[str, Any]] = []
+        current_day = start_day
+        while current_day <= end_day:
+            sleep = self._pick_scored_sleep_for_day(sleep_records, current_day)
+            cycle = self._pick_cycle_for_sleep_day(
+                cycle_records=cycle_records,
+                target_date=current_day,
+                sleep_record=sleep,
+            )
+            recovery = self._pick_recovery_for_sleep_cycle(
+                recovery_records=recovery_records,
+                target_date=current_day,
+                sleep_record=sleep,
+            )
+            payload = self._map_cycle_day(current_day, cycle, recovery, sleep)
+            if payload:
+                aggregated_days.append(payload)
+            current_day += timedelta(days=1)
+
+        start_index = 0
+        if next_token:
+            for index, item in enumerate(aggregated_days):
+                if item.get("date") == next_token:
+                    start_index = index
+                    break
+            else:
+                start_index = len(aggregated_days)
+
+        scoped_days = aggregated_days[start_index : start_index + limit]
+        computed_next_token = None
+        if (start_index + limit) < len(aggregated_days):
+            computed_next_token = str(aggregated_days[start_index + limit]["date"])
+
+        return {
+            "status": "ready",
+            "period": {"from": start_day.isoformat(), "to": end_day.isoformat()},
+            "days": scoped_days,
+            "next_token": computed_next_token,
+        }
+
+    async def fetch_workouts_range(
+        self,
+        profile_name: str,
+        start: datetime,
+        end: datetime,
+        limit: int,
+        next_token: str | None,
+    ) -> WorkoutsRangeResult:
+        _ = await self._ensure_access_token(profile_name=profile_name)
+        start_utc = start.astimezone(timezone.utc)
+        end_utc = end.astimezone(timezone.utc)
+        payload = await self._fetch_collection_page(
+            profile_name=profile_name,
+            path="/v2/workout",
+            start_utc=start_utc,
+            end_utc=end_utc,
+            limit=limit,
+            next_token=next_token,
+        )
+        records = self._normalize_records(payload)
+        workouts: list[dict[str, Any]] = []
+        for record in records:
+            mapped = self._map_workout(record)
+            if mapped:
+                workouts.append(mapped)
+
+        return {
+            "status": "ready",
+            "period": {
+                "from": start.astimezone(self._tz).date().isoformat(),
+                "to": end.astimezone(self._tz).date().isoformat(),
+            },
+            "workouts": workouts,
+            "next_token": self._extract_next_token(payload),
         }
 
     async def _ensure_access_token(self, profile_name: str, force_refresh: bool = False) -> str:
@@ -405,16 +538,68 @@ class WhoopClient:
         end_utc: datetime,
         limit: int = 25,
     ) -> list[dict[str, Any]]:
-        payload = await self._authorized_get(
+        payload = await self._fetch_collection_page(
             profile_name=profile_name,
             path=path,
-            params={
-                "start": self._to_zulu(start_utc),
-                "end": self._to_zulu(end_utc),
-                "limit": str(limit),
-            },
+            start_utc=start_utc,
+            end_utc=end_utc,
+            limit=limit,
+        )
+        return self._normalize_records(payload)
+
+    async def _fetch_collection_page(
+        self,
+        profile_name: str,
+        path: str,
+        start_utc: datetime,
+        end_utc: datetime,
+        limit: int = 25,
+        next_token: str | None = None,
+    ) -> dict[str, Any]:
+        params = {
+            "start": self._to_zulu(start_utc),
+            "end": self._to_zulu(end_utc),
+            "limit": str(limit),
+        }
+        if next_token:
+            params["nextToken"] = next_token
+        return await self._authorized_get(
+            profile_name=profile_name,
+            path=path,
+            params=params,
         )
 
+    async def _fetch_collection_all(
+        self,
+        profile_name: str,
+        path: str,
+        start_utc: datetime,
+        end_utc: datetime,
+    ) -> list[dict[str, Any]]:
+        aggregated: list[dict[str, Any]] = []
+        next_token: str | None = None
+        seen_tokens: set[str] = set()
+        while True:
+            payload = await self._fetch_collection_page(
+                profile_name=profile_name,
+                path=path,
+                start_utc=start_utc,
+                end_utc=end_utc,
+                limit=25,
+                next_token=next_token,
+            )
+            aggregated.extend(self._normalize_records(payload))
+            extracted_next_token = self._extract_next_token(payload)
+            if not extracted_next_token:
+                break
+            if extracted_next_token in seen_tokens:
+                break
+            seen_tokens.add(extracted_next_token)
+            next_token = extracted_next_token
+        return aggregated
+
+    @staticmethod
+    def _normalize_records(payload: dict[str, Any]) -> list[dict[str, Any]]:
         records = payload.get("records")
         if not isinstance(records, list):
             raise UnexpectedWhoopResponseError("Collection response missing records")
@@ -424,6 +609,14 @@ class WhoopClient:
             if isinstance(item, dict):
                 normalized.append(item)
         return normalized
+
+    @staticmethod
+    def _extract_next_token(payload: dict[str, Any]) -> str | None:
+        for key in ("next_token", "nextToken"):
+            token = payload.get(key)
+            if isinstance(token, str) and token:
+                return token
+        return None
 
     async def _authorized_get(self, profile_name: str, path: str, params: dict[str, str]) -> dict[str, Any]:
         access_token = await self._ensure_access_token(profile_name=profile_name)
@@ -846,7 +1039,7 @@ class WhoopClient:
         light_milli = stage_summary.get("total_light_sleep_time_milli")
         awake_milli = stage_summary.get("total_awake_time_milli")
 
-        return {
+        mapped: dict[str, Any] = {
             "score": int(round(self._require_number(performance, "sleep_performance_percentage"))),
             "total_hours": self._millis_to_hours(total_in_bed),
             "performance_percent": int(round(self._require_number(performance, "sleep_performance_percentage"))),
@@ -858,6 +1051,274 @@ class WhoopClient:
                 "awake_hours": self._millis_to_hours(awake_milli),
             },
         }
+        disturbance_count = self._first_number(score, ["disturbance_count", "sleep_disturbance_count"])
+        if disturbance_count is not None:
+            mapped["disturbance_count"] = int(round(disturbance_count))
+
+        sleep_cycle_count = self._first_number(score, ["sleep_cycle_count"])
+        if sleep_cycle_count is not None:
+            mapped["sleep_cycle_count"] = int(round(sleep_cycle_count))
+
+        consistency = self._first_number(score, ["consistency_percentage", "sleep_consistency_percentage"])
+        if consistency is not None:
+            mapped["consistency_percentage"] = int(round(consistency))
+
+        efficiency = self._first_number(score, ["efficiency_percentage", "sleep_efficiency_percentage"])
+        if efficiency is not None:
+            mapped["efficiency_percentage"] = int(round(efficiency))
+
+        sleep_need = score.get("sleep_needed")
+        if isinstance(sleep_need, dict):
+            baseline = self._first_number(
+                sleep_need,
+                ["baseline_milli", "baseline_sleep_need_milli", "baseline_hours", "baseline"],
+            )
+            if baseline is not None:
+                mapped["sleep_needed_hours"] = self._normalize_duration_hours(baseline)
+
+            debt = self._first_number(
+                sleep_need,
+                ["sleep_debt_milli", "need_from_sleep_debt_milli", "sleep_debt_hours"],
+            )
+            if debt is not None:
+                mapped["sleep_debt_hours"] = self._normalize_duration_hours(debt)
+
+            strain_related = self._first_number(
+                sleep_need,
+                ["strain_related_need_milli", "need_from_recent_strain_milli", "strain_related_need_hours"],
+            )
+            if strain_related is not None:
+                mapped["strain_related_need_hours"] = self._normalize_duration_hours(strain_related)
+
+        return mapped
+
+    def _map_cycle_day(
+        self,
+        target_date: date,
+        cycle: dict[str, Any] | None,
+        recovery: dict[str, Any] | None,
+        sleep: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if cycle is None and recovery is None and sleep is None:
+            return None
+
+        payload: dict[str, Any] = {"date": target_date.isoformat()}
+
+        if cycle is not None:
+            cycle_id = cycle.get("id")
+            if cycle_id is not None:
+                try:
+                    payload["cycle_id"] = int(cycle_id)
+                except (TypeError, ValueError):
+                    pass
+
+            cycle_score = cycle.get("score")
+            if isinstance(cycle_score, dict):
+                strain = self._first_number(cycle_score, ["strain"])
+                if strain is not None:
+                    payload["strain_score"] = round(strain, 1)
+                kilojoule = self._first_number(cycle_score, ["kilojoule"])
+                if kilojoule is not None:
+                    payload["kilojoules"] = int(round(kilojoule))
+
+        if recovery is not None:
+            recovery_score = recovery.get("score")
+            if isinstance(recovery_score, dict):
+                value = self._first_number(recovery_score, ["recovery_score"])
+                if value is not None:
+                    value_int = int(round(value))
+                    payload["recovery_score"] = value_int
+                    payload["recovery_zone"] = self._extract_zone(recovery_score, value_int)
+
+                hrv = self._first_number(recovery_score, ["hrv_rmssd_milli"])
+                if hrv is not None:
+                    payload["hrv_ms"] = int(round(hrv))
+
+                resting_hr = self._first_number(recovery_score, ["resting_heart_rate"])
+                if resting_hr is not None:
+                    payload["resting_hr_bpm"] = int(round(resting_hr))
+
+                spo2 = self._first_number(recovery_score, ["spo2_percentage", "spo2"])
+                if spo2 is not None:
+                    payload["spo2_percentage"] = round(spo2, 1)
+
+                skin_temp = self._first_number(
+                    recovery_score,
+                    ["skin_temp_celsius", "skin_temperature_celsius", "skin_temp"],
+                )
+                if skin_temp is not None:
+                    payload["skin_temp_celsius"] = round(skin_temp, 1)
+
+        if sleep is not None:
+            sleep_score = sleep.get("score")
+            if isinstance(sleep_score, dict):
+                performance = self._first_number(sleep_score, ["sleep_performance_percentage"])
+                if performance is not None:
+                    payload["sleep_score"] = int(round(performance))
+
+                stage_summary = sleep_score.get("stage_summary")
+                if isinstance(stage_summary, dict):
+                    total_in_bed = self._first_number(stage_summary, ["total_in_bed_time_milli"])
+                    if total_in_bed is not None:
+                        payload["sleep_hours"] = round(total_in_bed / 3_600_000, 1)
+
+                disturbance_count = self._first_number(sleep_score, ["disturbance_count", "sleep_disturbance_count"])
+                if disturbance_count is not None:
+                    payload["sleep_disturbance_count"] = int(round(disturbance_count))
+
+                consistency = self._first_number(sleep_score, ["consistency_percentage", "sleep_consistency_percentage"])
+                if consistency is not None:
+                    payload["sleep_consistency_percentage"] = int(round(consistency))
+
+                efficiency = self._first_number(sleep_score, ["efficiency_percentage", "sleep_efficiency_percentage"])
+                if efficiency is not None:
+                    payload["sleep_efficiency_percentage"] = int(round(efficiency))
+
+        return payload
+
+    def _map_workout(self, workout: dict[str, Any]) -> dict[str, Any] | None:
+        workout_id = workout.get("id", workout.get("workout_id"))
+        if workout_id is None:
+            return None
+        workout_id_raw = str(workout_id).strip()
+        if not workout_id_raw:
+            return None
+
+        start_raw = workout.get("start")
+        end_raw = workout.get("end")
+        start_dt = self._parse_datetime(start_raw) if isinstance(start_raw, str) else None
+        end_dt = self._parse_datetime(end_raw) if isinstance(end_raw, str) else None
+        date_value = start_dt or end_dt
+        if date_value is None:
+            return None
+
+        payload: dict[str, Any] = {
+            "workout_id": workout_id_raw,
+            "date": date_value.astimezone(self._tz).date().isoformat(),
+            "sport_name": self._resolve_sport_name(workout),
+        }
+        if isinstance(start_raw, str):
+            payload["start"] = start_raw
+        if isinstance(end_raw, str):
+            payload["end"] = end_raw
+
+        score = workout.get("score")
+        score_block = score if isinstance(score, dict) else {}
+
+        strain = self._first_number(score_block, ["strain"])
+        if strain is None:
+            strain = self._first_number(workout, ["strain"])
+        if strain is not None:
+            payload["strain_score"] = round(strain, 1)
+
+        kilojoules = self._first_number(score_block, ["kilojoule"])
+        if kilojoules is None:
+            kilojoules = self._first_number(workout, ["kilojoule"])
+        if kilojoules is not None:
+            payload["kilojoules"] = int(round(kilojoules))
+
+        average_hr = self._first_number(score_block, ["average_heart_rate"])
+        if average_hr is None:
+            average_hr = self._first_number(workout, ["average_heart_rate"])
+        if average_hr is not None:
+            payload["average_hr_bpm"] = int(round(average_hr))
+
+        max_hr = self._first_number(score_block, ["max_heart_rate"])
+        if max_hr is None:
+            max_hr = self._first_number(workout, ["max_heart_rate"])
+        if max_hr is not None:
+            payload["max_hr_bpm"] = int(round(max_hr))
+
+        distance = self._first_number(score_block, ["distance_meter", "distance_meters"])
+        if distance is None:
+            distance = self._first_number(workout, ["distance_meter", "distance_meters"])
+        if distance is not None:
+            payload["distance_meter"] = round(distance, 2)
+
+        altitude = self._first_number(
+            score_block,
+            ["altitude_gain_meter", "altitude_gain_meters"],
+        )
+        if altitude is None:
+            altitude = self._first_number(workout, ["altitude_gain_meter", "altitude_gain_meters"])
+        if altitude is not None:
+            payload["altitude_gain_meter"] = round(altitude, 2)
+
+        percent_recorded = self._first_number(score_block, ["percent_recorded"])
+        if percent_recorded is None:
+            percent_recorded = self._first_number(workout, ["percent_recorded"])
+        if percent_recorded is not None:
+            payload["percent_recorded"] = int(round(percent_recorded))
+
+        zone_durations = self._extract_zone_durations(workout, score_block)
+        if zone_durations:
+            payload["zone_durations"] = zone_durations
+
+        return payload
+
+    def _extract_zone_durations(self, workout: dict[str, Any], score_block: dict[str, Any]) -> dict[str, int] | None:
+        candidates = [
+            workout.get("zone_durations"),
+            workout.get("zone_duration"),
+            score_block.get("zone_durations"),
+            score_block.get("zone_duration"),
+        ]
+        source: dict[str, Any] | None = None
+        for candidate in candidates:
+            if isinstance(candidate, dict):
+                source = candidate
+                break
+        if source is None:
+            return None
+
+        mapped: dict[str, int] = {}
+        zones = [
+            ("zone_zero_milli", ["zone_zero_milli", "zone_0_milli"]),
+            ("zone_one_milli", ["zone_one_milli", "zone_1_milli"]),
+            ("zone_two_milli", ["zone_two_milli", "zone_2_milli"]),
+            ("zone_three_milli", ["zone_three_milli", "zone_3_milli"]),
+            ("zone_four_milli", ["zone_four_milli", "zone_4_milli"]),
+            ("zone_five_milli", ["zone_five_milli", "zone_5_milli"]),
+        ]
+        for target_key, source_keys in zones:
+            value = self._first_number(source, source_keys)
+            if value is not None:
+                mapped[target_key] = int(round(value))
+        return mapped or None
+
+    @staticmethod
+    def _resolve_sport_name(workout: dict[str, Any]) -> str:
+        for key in ("sport_name", "sport", "sport_type"):
+            value = workout.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip().lower()
+        return "unknown"
+
+    @staticmethod
+    def _normalize_duration_hours(value: float) -> float:
+        if abs(value) > 1000:
+            return round(value / 3_600_000, 1)
+        return round(value, 1)
+
+    @staticmethod
+    def _first_number(source: dict[str, Any], keys: list[str]) -> float | None:
+        for key in keys:
+            raw = source.get(key)
+            try:
+                if raw is None:
+                    continue
+                return float(raw)
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    @staticmethod
+    def _first_bool(source: dict[str, Any], keys: list[str]) -> bool | None:
+        for key in keys:
+            raw = source.get(key)
+            if isinstance(raw, bool):
+                return raw
+        return None
 
     @staticmethod
     def _expect_stage_summary(score: dict[str, Any]) -> dict[str, Any]:

@@ -34,6 +34,10 @@ class RecoveryReadyResponse(BaseModel):
     recovery_zone: Literal["green", "yellow", "red"]
     hrv_ms: int | None = None
     resting_hr_bpm: int | None = None
+    spo2_percentage: float | None = None
+    skin_temp_celsius: float | None = None
+    user_calibrating: bool | None = None
+    timezone_offset: str
     cached: bool = False
 
 
@@ -57,6 +61,13 @@ class SleepResponse(BaseModel):
     performance_percent: int
     respiratory_rate: float
     stages: SleepStagesResponse
+    disturbance_count: int | None = None
+    sleep_cycle_count: int | None = None
+    consistency_percentage: int | None = None
+    efficiency_percentage: int | None = None
+    sleep_needed_hours: float | None = None
+    sleep_debt_hours: float | None = None
+    strain_related_need_hours: float | None = None
 
 
 class YesterdayReadyResponse(BaseModel):
@@ -64,10 +75,11 @@ class YesterdayReadyResponse(BaseModel):
     date: str
     strain: StrainResponse
     sleep: SleepResponse
+    timezone_offset: str
     cached: bool = False
 
 
-class WeekPeriodResponse(BaseModel):
+class PeriodResponse(BaseModel):
     from_: str = Field(alias="from")
     to: str
 
@@ -93,5 +105,66 @@ WeekDayResponse = Union[WeekDayReadyResponse, WeekDayMissingResponse]
 
 
 class WeekResponse(BaseModel):
-    period: WeekPeriodResponse
+    period: PeriodResponse
     days: list[WeekDayResponse]
+
+
+class CycleDayResponse(BaseModel):
+    date: str
+    cycle_id: int | None = None
+    recovery_score: int | None = Field(default=None, ge=0, le=100)
+    recovery_zone: Literal["green", "yellow", "red"] | None = None
+    hrv_ms: int | None = None
+    resting_hr_bpm: int | None = None
+    spo2_percentage: float | None = None
+    skin_temp_celsius: float | None = None
+    strain_score: float | None = None
+    kilojoules: int | None = None
+    sleep_score: int | None = None
+    sleep_hours: float | None = None
+    sleep_disturbance_count: int | None = None
+    sleep_consistency_percentage: int | None = None
+    sleep_efficiency_percentage: int | None = None
+
+
+class CyclesResponse(BaseModel):
+    status: Literal["ready"] = "ready"
+    period: PeriodResponse
+    days: list[CycleDayResponse]
+    next_token: str | None = None
+    cached: bool = False
+    timezone_offset: str
+
+
+class ZoneDurationsResponse(BaseModel):
+    zone_zero_milli: int | None = None
+    zone_one_milli: int | None = None
+    zone_two_milli: int | None = None
+    zone_three_milli: int | None = None
+    zone_four_milli: int | None = None
+    zone_five_milli: int | None = None
+
+
+class WorkoutItemResponse(BaseModel):
+    workout_id: str
+    date: str
+    sport_name: str
+    start: str | None = None
+    end: str | None = None
+    strain_score: float | None = None
+    kilojoules: int | None = None
+    average_hr_bpm: int | None = None
+    max_hr_bpm: int | None = None
+    distance_meter: float | None = None
+    altitude_gain_meter: float | None = None
+    percent_recorded: int | None = None
+    zone_durations: ZoneDurationsResponse | None = None
+
+
+class WorkoutsResponse(BaseModel):
+    status: Literal["ready"] = "ready"
+    period: PeriodResponse
+    workouts: list[WorkoutItemResponse]
+    next_token: str | None = None
+    cached: bool = False
+    timezone_offset: str

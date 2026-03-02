@@ -31,7 +31,7 @@
 - `start` (required, ISO8601 datetime)
 - `end` (optional, ISO8601 datetime, default = now)
 - `limit` (optional, int, default 10, max 25)
-- `nextToken` (optional, string)
+- `next_token` (optional, string, `YYYY-MM-DD`)
 
 Ответ:
 - `status: "ready"`
@@ -47,7 +47,7 @@
 - `start` (required)
 - `end` (optional)
 - `limit` (optional, default 10, max 25)
-- `nextToken` (optional)
+- `next_token` (optional)
 
 Ответ:
 - `status: "ready"`
@@ -83,10 +83,10 @@
 
 ### 4.1 Источники данных
 
-- `GET /v2/cycle` (или `GET /api/v2/cycles`, подтверждается контрактным тестом)
-- `GET /v2/workout` (или `GET /api/v2/workouts`, подтверждается контрактным тестом)
+- `GET /v2/cycle`
+- `GET /v2/workout`
 - `GET /v2/recovery`
-- `GET /v2/activity/sleep` (или `GET /api/v2/sleep`, подтверждается контрактным тестом)
+- `GET /v2/activity/sleep`
 
 ### 4.2 OAuth scope
 
@@ -128,9 +128,8 @@
 
 ### 6.2 Пагинация
 
-- Входной `nextToken` проксируется в WHOOP.
-- В ответе возвращаем `next_token` из WHOOP payload.
-- Для collection endpoints поддерживаем частичные страницы без изменения порядка данных.
+- Для `/cycles` используем локальную пагинацию по агрегированным дням (`next_token=YYYY-MM-DD`).
+- Для `/workouts` проксируем `next_token` в Whoop и возвращаем `next_token` из Whoop payload.
 
 ### 6.3 Timezone
 
@@ -143,7 +142,7 @@
 
 - `/cycles`, `/workouts`:
   - `ready` кэшировать 12 часов;
-  - `pending` не кэшировать либо кэшировать 300 секунд (выбираем 300s, чтобы снизить нагрузку).
+  - `pending` TTL зарезервирован (`RANGE_PENDING_TTL_SECONDS=300`) для последующих итераций.
 - `/recovery/today`, `/day/yesterday`, `/week`:
   - оставить текущую политику, но добавить новые поля в кэшируемый payload.
 
@@ -152,7 +151,7 @@
 Для range endpoints включить в ключ:
 - профиль;
 - endpoint;
-- `start`, `end`, `limit`, `nextToken`.
+- `start`, `end`, `limit`, `next_token`.
 
 Реализация через детерминированный hash от query-параметров.
 
@@ -201,7 +200,7 @@
 - Поддержать ключи, основанные на query-параметрах.
 
 5. `app/config.py`
-- Добавить настройки TTL для range endpoints (например, `CACHE_TTL_RANGE_READY_SECONDS=43200`, `CACHE_TTL_RANGE_PENDING_SECONDS=300`).
+- Добавить настройки TTL для range endpoints: `RANGE_READY_TTL_SECONDS=43200`, `RANGE_PENDING_TTL_SECONDS=300`.
 
 ## 10. План тестирования
 
@@ -210,7 +209,7 @@
 - `WhoopClient`:
   - маппинг новых полей recovery/sleep;
   - маппинг workouts + zone_durations;
-  - пагинация `nextToken`;
+  - пагинация `next_token`;
   - graceful degradation на отсутствующих полях.
 
 ### 10.2 Smoke/API
@@ -226,7 +225,7 @@
 
 ### 10.3 Integration (live, gated)
 
-- Контракт WHOOP v2 path-паттернов (`/v2/*` vs `/api/v2/*`).
+- Проверка доступности `GET /v2/workout`.
 - История 30 дней на `/cycles`.
 - Проверка `sport_name` на реальных данных.
 

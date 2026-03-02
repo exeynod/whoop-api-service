@@ -19,8 +19,26 @@ Technical design:
 - OAuth2 authorization code flow (`/auth/init`, `/auth/callback`)
 - Token persistence in `/secrets/whoop_tokens.json` with auto refresh per profile
 - File cache in `/cache/<profile>/...` (only `ready` responses)
+- Range cache for collection endpoints (`/cycles`, `/workouts`) with TTL
 - Daily cache cleanup on startup and at 03:00 MSK
 - Local smoke tests, unit tests, and gated live integration tests
+
+## Data Routes
+
+Protected routes (require `X-API-Key`):
+
+- `GET /recovery/today`
+- `GET /day/yesterday`
+- `GET /week`
+- `GET /cycles?start=...&end=...&limit=...&next_token=...`
+- `GET /workouts?start=...&end=...&limit=...&next_token=...`
+
+Collection routes (`/cycles`, `/workouts`) use `next_token` (snake_case).
+
+## Error Semantics
+
+- `401 Unauthorized`: invalid/missing `X-API-Key` or Whoop reauthorization required after refresh+retry.
+- `502 Bad Gateway`: Whoop timeout/unavailable or unexpected upstream payload.
 
 ## Environment
 
@@ -30,6 +48,8 @@ Copy `.env.example` to `.env` and set values:
 - `WHOOP_CLIENT_SECRET`
 - `WHOOP_REDIRECT_URI`
 - `TZ=Europe/Moscow`
+- `RANGE_READY_TTL_SECONDS=43200`
+- `RANGE_PENDING_TTL_SECONDS=300`
 - `WHOOP_HTTP_LOG_ENABLED=true`
 - `WHOOP_HTTP_LOG_LEVEL=INFO`
 - `WHOOP_HTTP_LOG_BODY_MAX_CHARS=4000`
@@ -38,6 +58,22 @@ Copy `.env.example` to `.env` and set values:
 
 `X-API-Key` is resolved from profile records in `/secrets/whoop_tokens.json`.
 Global API key in `.env` is not used.
+
+## Curl Examples
+
+Cycles:
+
+```bash
+curl -sS "${WHOOP_SERVICE_BASE_URL}/cycles?start=2026-02-01T00:00:00%2B03:00&end=2026-03-02T00:00:00%2B03:00&limit=10" \
+  -H "X-API-Key: ${WHOOP_SERVICE_TOKEN}"
+```
+
+Workouts:
+
+```bash
+curl -sS "${WHOOP_SERVICE_BASE_URL}/workouts?start=2026-02-01T00:00:00%2B03:00&end=2026-03-02T00:00:00%2B03:00&limit=10" \
+  -H "X-API-Key: ${WHOOP_SERVICE_TOKEN}"
+```
 
 ## Local Run
 

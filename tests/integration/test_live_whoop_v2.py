@@ -73,16 +73,19 @@ async def test_live_v2_collections_contract_shape():
         recovery_resp = await client.get(f"{base}/recovery", headers=headers, params=params)
         cycle_resp = await client.get(f"{base}/cycle", headers=headers, params=params)
         sleep_resp = await client.get(f"{base}/activity/sleep", headers=headers, params=params)
+        workout_resp = await client.get(f"{base}/workout", headers=headers, params=params)
 
     assert recovery_resp.status_code == 200, recovery_resp.text
     assert cycle_resp.status_code == 200, cycle_resp.text
     assert sleep_resp.status_code == 200, sleep_resp.text
+    assert workout_resp.status_code == 200, workout_resp.text
 
     recovery_payload = recovery_resp.json()
     cycle_payload = cycle_resp.json()
     sleep_payload = sleep_resp.json()
+    workout_payload = workout_resp.json()
 
-    for payload in (recovery_payload, cycle_payload, sleep_payload):
+    for payload in (recovery_payload, cycle_payload, sleep_payload, workout_payload):
         assert isinstance(payload, dict)
         assert isinstance(payload.get("records"), list)
 
@@ -98,3 +101,28 @@ async def test_live_v2_collections_contract_shape():
         first = sleep_payload["records"][0]
         assert isinstance(first.get("score_state"), str)
         assert "nap" in first
+
+    if workout_payload["records"]:
+        first = workout_payload["records"][0]
+        assert isinstance(first.get("id"), (str, int))
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_live_v2_cycle_30_day_window_contract_shape():
+    secrets = _load_live_secrets()
+    token = secrets["access_token"]
+
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(days=30)
+    params = {"start": _zulu(start), "end": _zulu(end), "limit": "25"}
+    headers = {"Authorization": f"Bearer {token}"}
+
+    base = f"{_developer_base()}/v2"
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        cycle_resp = await client.get(f"{base}/cycle", headers=headers, params=params)
+
+    assert cycle_resp.status_code == 200, cycle_resp.text
+    payload = cycle_resp.json()
+    assert isinstance(payload, dict)
+    assert isinstance(payload.get("records"), list)

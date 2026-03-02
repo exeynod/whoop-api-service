@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import date
 
 import pytest
@@ -56,3 +57,43 @@ def test_cleanup_deletes_only_expired_json_files(tmp_path):
     assert not (tmp_path / "denis" / "recovery_2026-01-10.json").exists()
     assert (tmp_path / "denis" / "recovery_2026-01-28.json").exists()
     assert (tmp_path / "denis" / "invalid_name.json").exists()
+
+
+@pytest.mark.unit
+def test_save_and_load_range_ready_payload(tmp_path):
+    cache = FileCache(cache_dir=tmp_path, timezone_name="Europe/Moscow", retention_days=30)
+    payload = {"status": "ready", "items": [1, 2, 3]}
+
+    assert cache.save_range_ready("denis", "cycles", "k1", payload) is True
+    loaded = cache.load_range_ready("denis", "cycles", "k1", ttl_seconds=43200)
+    assert loaded == payload
+
+
+@pytest.mark.unit
+def test_load_range_ready_returns_none_when_expired(tmp_path):
+    cache = FileCache(cache_dir=tmp_path, timezone_name="Europe/Moscow", retention_days=30)
+    payload = {"status": "ready", "items": [1]}
+    assert cache.save_range_ready("denis", "cycles", "k2", payload) is True
+
+    cache_file = tmp_path / "denis" / "cycles_range_k2.json"
+    envelope = json.loads(cache_file.read_text(encoding="utf-8"))
+    envelope["saved_at"] = "2000-01-01T00:00:00Z"
+    cache_file.write_text(json.dumps(envelope), encoding="utf-8")
+
+    assert cache.load_range_ready("denis", "cycles", "k2", ttl_seconds=43200) is None
+
+
+@pytest.mark.unit
+def test_cleanup_deletes_expired_range_cache_files(tmp_path):
+    cache = FileCache(cache_dir=tmp_path, timezone_name="Europe/Moscow", retention_days=30)
+    payload = {"status": "ready", "items": [1]}
+    assert cache.save_range_ready("denis", "cycles", "k3", payload) is True
+
+    cache_file = tmp_path / "denis" / "cycles_range_k3.json"
+    envelope = json.loads(cache_file.read_text(encoding="utf-8"))
+    envelope["saved_at"] = "2000-01-01T00:00:00Z"
+    cache_file.write_text(json.dumps(envelope), encoding="utf-8")
+
+    deleted = cache.cleanup_expired(today=date(2026, 2, 27))
+    assert deleted >= 1
+    assert not cache_file.exists()

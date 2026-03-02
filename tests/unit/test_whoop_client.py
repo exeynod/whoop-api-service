@@ -62,6 +62,7 @@ async def test_build_authorization_url_contains_expected_oauth_params():
     assert query["redirect_uri"] == [settings.whoop_redirect_uri]
     assert query["state"] == ["state-123"]
     assert "read:recovery" in query["scope"][0]
+    assert "read:workout" in query["scope"][0]
 
 
 @pytest.mark.unit
@@ -168,7 +169,10 @@ async def test_fetch_recovery_refreshes_expired_access_token():
                             "recovery_score": 74,
                             "resting_heart_rate": 48,
                             "hrv_rmssd_milli": 52,
+                            "spo2_percentage": 97.1,
+                            "skin_temp_celsius": 33.8,
                         },
+                        "user_calibrating": False,
                     }
                 ]
             },
@@ -178,6 +182,9 @@ async def test_fetch_recovery_refreshes_expired_access_token():
 
     assert result["status"] == "ready"
     assert result["recovery_score"] == 74
+    assert result["spo2_percentage"] == 97.1
+    assert result["skin_temp_celsius"] == 33.8
+    assert result["user_calibrating"] is False
     saved = json.loads(settings.token_path.read_text(encoding="utf-8"))
     assert saved["profiles"]["denis"]["whoop"]["access_token"] == "fresh-access"
 
@@ -308,6 +315,15 @@ async def test_fetch_yesterday_snapshot_maps_cycle_and_sleep_payloads():
                         "score": {
                             "sleep_performance_percentage": 88,
                             "respiratory_rate": 15.2,
+                            "disturbance_count": 3,
+                            "sleep_cycle_count": 5,
+                            "sleep_consistency_percentage": 92,
+                            "sleep_efficiency_percentage": 89,
+                            "sleep_needed": {
+                                "baseline_milli": 27000000,
+                                "sleep_debt_milli": 720000,
+                                "strain_related_need_milli": 1800000,
+                            },
                             "stage_summary": {
                                 "total_in_bed_time_milli": 26640000,
                                 "total_awake_time_milli": 2520000,
@@ -328,6 +344,13 @@ async def test_fetch_yesterday_snapshot_maps_cycle_and_sleep_payloads():
     assert result["strain"]["kilojoules"] == 1823
     assert result["sleep"]["respiratory_rate"] == 15.2
     assert result["sleep"]["stages"]["deep_hours"] == 1.6
+    assert result["sleep"]["disturbance_count"] == 3
+    assert result["sleep"]["sleep_cycle_count"] == 5
+    assert result["sleep"]["consistency_percentage"] == 92
+    assert result["sleep"]["efficiency_percentage"] == 89
+    assert result["sleep"]["sleep_needed_hours"] == 7.5
+    assert result["sleep"]["sleep_debt_hours"] == 0.2
+    assert result["sleep"]["strain_related_need_hours"] == 0.5
 
 
 @pytest.mark.unit
@@ -725,6 +748,247 @@ async def test_fetch_week_day_returns_missing_when_records_are_other_day():
         result = await client.fetch_week_day("denis", date(2026, 2, 25))
 
     assert result == {"date": "2026-02-25", "status": "missing"}
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_fetch_cycles_range_aggregates_and_paginates_by_local_day_token():
+    settings = get_settings()
+    client = WhoopClient(settings)
+    now = datetime.now(timezone.utc)
+    _write_profile_file(
+        settings.token_path,
+        profile_name="denis",
+        api_token="api-denis",
+        access_token="access",
+        refresh_token="refresh",
+        expires_at=now + timedelta(hours=1),
+        refresh_expires_at=now + timedelta(days=7),
+    )
+    msk = timezone(timedelta(hours=3))
+    start = datetime(2026, 3, 1, 0, 0, tzinfo=msk)
+    end = datetime(2026, 3, 2, 23, 59, tzinfo=msk)
+
+    with respx.mock(assert_all_called=True) as mock:
+        mock.get(f"{settings.whoop_api_base_url}/v2/cycle").respond(
+            200,
+            json={
+                "records": [
+                    {
+                        "id": 1341472781,
+                        "score_state": "SCORED",
+                        "start": "2026-03-01T19:45:51.001Z",
+                        "end": None,
+                        "score": {
+                            "strain": 4.6107326,
+                            "kilojoule": 5110,
+                            "average_heart_rate": 58,
+                            "max_heart_rate": 128,
+                        },
+                    },
+                    {
+                        "id": 1339692348,
+                        "score_state": "SCORED",
+                        "start": "2026-02-28T23:45:42.865Z",
+                        "end": "2026-03-01T19:45:51.001Z",
+                        "score": {
+                            "strain": 15.648103,
+                            "kilojoule": 1823,
+                            "average_heart_rate": 112,
+                            "max_heart_rate": 171,
+                        },
+                    },
+                ]
+            },
+        )
+        mock.get(f"{settings.whoop_api_base_url}/v2/recovery").respond(
+            200,
+            json={
+                "records": [
+                    {
+                        "score_state": "SCORED",
+                        "cycle_id": 1341472781,
+                        "score": {
+                            "recovery_score": 86,
+                            "resting_heart_rate": 45,
+                            "hrv_rmssd_milli": 110,
+                            "spo2_percentage": 97.2,
+                            "skin_temp_celsius": 33.9,
+                        },
+                    },
+                    {
+                        "score_state": "SCORED",
+                        "cycle_id": 1339692348,
+                        "score": {
+                            "recovery_score": 70,
+                            "resting_heart_rate": 49,
+                            "hrv_rmssd_milli": 101,
+                            "spo2_percentage": 96.5,
+                            "skin_temp_celsius": 33.6,
+                        },
+                    },
+                ]
+            },
+        )
+        mock.get(f"{settings.whoop_api_base_url}/v2/activity/sleep").respond(
+            200,
+            json={
+                "records": [
+                    {
+                        "id": "sleep-today",
+                        "score_state": "SCORED",
+                        "nap": False,
+                        "start": "2026-03-01T19:45:51.001Z",
+                        "end": "2026-03-02T03:53:12.237Z",
+                        "cycle_id": 1341472781,
+                        "score": {
+                            "sleep_performance_percentage": 74,
+                            "disturbance_count": 2,
+                            "sleep_consistency_percentage": 91,
+                            "sleep_efficiency_percentage": 88,
+                            "respiratory_rate": 13.8,
+                            "stage_summary": {
+                                "total_in_bed_time_milli": 29160000,
+                                "total_awake_time_milli": 2520000,
+                                "total_light_sleep_time_milli": 12960000,
+                                "total_rem_sleep_time_milli": 5760000,
+                                "total_slow_wave_sleep_time_milli": 8280000,
+                            },
+                        },
+                    },
+                    {
+                        "id": "sleep-yesterday",
+                        "score_state": "SCORED",
+                        "nap": False,
+                        "start": "2026-02-28T23:45:42.865Z",
+                        "end": "2026-03-01T06:05:45.129Z",
+                        "cycle_id": 1339692348,
+                        "score": {
+                            "sleep_performance_percentage": 72,
+                            "disturbance_count": 3,
+                            "sleep_consistency_percentage": 89,
+                            "sleep_efficiency_percentage": 84,
+                            "respiratory_rate": 14.8,
+                            "stage_summary": {
+                                "total_in_bed_time_milli": 18000000,
+                                "total_awake_time_milli": 1800000,
+                                "total_light_sleep_time_milli": 9000000,
+                                "total_rem_sleep_time_milli": 3600000,
+                                "total_slow_wave_sleep_time_milli": 3600000,
+                            },
+                        },
+                    },
+                ]
+            },
+        )
+
+        first = await client.fetch_cycles_range(
+            profile_name="denis",
+            start=start,
+            end=end,
+            limit=1,
+            next_token=None,
+        )
+        second = await client.fetch_cycles_range(
+            profile_name="denis",
+            start=start,
+            end=end,
+            limit=1,
+            next_token=first["next_token"],
+        )
+
+    assert first["status"] == "ready"
+    assert first["period"] == {"from": "2026-03-01", "to": "2026-03-02"}
+    assert len(first["days"]) == 1
+    assert first["days"][0]["date"] == "2026-03-01"
+    assert first["days"][0]["cycle_id"] == 1339692348
+    assert first["days"][0]["recovery_score"] == 70
+    assert first["days"][0]["sleep_disturbance_count"] == 3
+    assert first["next_token"] == "2026-03-02"
+
+    assert second["status"] == "ready"
+    assert len(second["days"]) == 1
+    assert second["days"][0]["date"] == "2026-03-02"
+    assert second["days"][0]["cycle_id"] == 1341472781
+    assert second["days"][0]["recovery_score"] == 86
+    assert second["next_token"] is None
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_fetch_workouts_range_maps_payload_and_next_token():
+    settings = get_settings()
+    client = WhoopClient(settings)
+    now = datetime.now(timezone.utc)
+    _write_profile_file(
+        settings.token_path,
+        profile_name="denis",
+        api_token="api-denis",
+        access_token="access",
+        refresh_token="refresh",
+        expires_at=now + timedelta(hours=1),
+        refresh_expires_at=now + timedelta(days=7),
+    )
+    msk = timezone(timedelta(hours=3))
+    start = datetime(2026, 3, 1, 0, 0, tzinfo=msk)
+    end = datetime(2026, 3, 2, 23, 59, tzinfo=msk)
+
+    with respx.mock(assert_all_called=True) as mock:
+        mock.get(f"{settings.whoop_api_base_url}/v2/workout").respond(
+            200,
+            json={
+                "records": [
+                    {
+                        "id": "w1",
+                        "sport_name": "hockey",
+                        "start": "2026-03-01T15:00:00Z",
+                        "end": "2026-03-01T17:00:00Z",
+                        "score": {
+                            "strain": 12.43,
+                            "kilojoule": 1823,
+                            "average_heart_rate": 112,
+                            "max_heart_rate": 171,
+                            "distance_meter": 1772.77,
+                            "altitude_gain_meter": 46.64,
+                            "percent_recorded": 100,
+                            "zone_duration": {
+                                "zone_zero_milli": 300000,
+                                "zone_one_milli": 600000,
+                                "zone_two_milli": 900000,
+                                "zone_three_milli": 900000,
+                                "zone_four_milli": 600000,
+                                "zone_five_milli": 300000,
+                            },
+                        },
+                    },
+                    {
+                        "id": "w2",
+                        "start": "2026-03-02T16:00:00Z",
+                        "end": "2026-03-02T17:00:00Z",
+                        "score": {"strain": 4.1},
+                    },
+                ],
+                "nextToken": "next-page-2",
+            },
+        )
+
+        result = await client.fetch_workouts_range(
+            profile_name="denis",
+            start=start,
+            end=end,
+            limit=10,
+            next_token=None,
+        )
+
+    assert result["status"] == "ready"
+    assert result["period"] == {"from": "2026-03-01", "to": "2026-03-02"}
+    assert result["next_token"] == "next-page-2"
+    assert len(result["workouts"]) == 2
+    assert result["workouts"][0]["workout_id"] == "w1"
+    assert result["workouts"][0]["sport_name"] == "hockey"
+    assert result["workouts"][0]["zone_durations"]["zone_three_milli"] == 900000
+    assert result["workouts"][1]["workout_id"] == "w2"
+    assert result["workouts"][1]["sport_name"] == "unknown"
 
 
 @pytest.mark.unit

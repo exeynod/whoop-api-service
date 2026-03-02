@@ -13,7 +13,7 @@ import app.router as data_router
 from app.config import get_settings
 from app.deps import get_cache, get_rate_limiter, get_whoop_client
 from app.main import create_app
-from app.whoop_client import WhoopTimeoutError, WhoopUnavailableError
+from app.whoop_client import ReauthorizationRequiredError, WhoopTimeoutError, WhoopUnavailableError
 
 
 class FakeWhoopClient:
@@ -22,14 +22,22 @@ class FakeWhoopClient:
         self.recovery_calls = 0
         self.day_calls = 0
         self.week_calls = 0
+        self.cycles_calls = 0
+        self.workouts_calls = 0
         self.profile_resolve_calls = 0
         self.profile_map = {"test-api-key": "denis"}
         self._recovery_payloads: list[dict] = []
         self._day_payloads: list[dict] = []
         self._week_payloads: list[dict] = []
+        self._cycles_payloads: list[dict] = []
+        self._workouts_payloads: list[dict] = []
         self._recovery_exc: Exception | None = None
         self._day_exc: Exception | None = None
         self._week_exc: Exception | None = None
+        self._cycles_exc: Exception | None = None
+        self._workouts_exc: Exception | None = None
+        self.last_cycles_args: dict | None = None
+        self.last_workouts_args: dict | None = None
 
     def resolve_profile_name(self, api_token: str) -> str | None:
         self.profile_resolve_calls += 1
@@ -108,6 +116,90 @@ class FakeWhoopClient:
             "strain_score": 14.2,
             "sleep_score": 81,
             "sleep_hours": 7.4,
+        }
+
+    async def fetch_cycles_range(
+        self,
+        profile_name: str,
+        start: datetime,
+        end: datetime,
+        limit: int,
+        next_token: str | None,
+    ) -> dict:
+        _ = profile_name
+        self.cycles_calls += 1
+        self.last_cycles_args = {
+            "start": start,
+            "end": end,
+            "limit": limit,
+            "next_token": next_token,
+        }
+        if self._cycles_exc:
+            raise self._cycles_exc
+        if self._cycles_payloads:
+            return self._cycles_payloads.pop(0)
+        return {
+            "status": "ready",
+            "period": {"from": "2026-02-20", "to": "2026-02-26"},
+            "days": [
+                {
+                    "date": "2026-02-26",
+                    "cycle_id": 123456,
+                    "recovery_score": 73,
+                    "recovery_zone": "yellow",
+                    "hrv_ms": 52,
+                    "resting_hr_bpm": 48,
+                    "strain_score": 14.1,
+                    "sleep_score": 85,
+                    "sleep_hours": 7.4,
+                }
+            ],
+            "next_token": None,
+        }
+
+    async def fetch_workouts_range(
+        self,
+        profile_name: str,
+        start: datetime,
+        end: datetime,
+        limit: int,
+        next_token: str | None,
+    ) -> dict:
+        _ = profile_name
+        self.workouts_calls += 1
+        self.last_workouts_args = {
+            "start": start,
+            "end": end,
+            "limit": limit,
+            "next_token": next_token,
+        }
+        if self._workouts_exc:
+            raise self._workouts_exc
+        if self._workouts_payloads:
+            return self._workouts_payloads.pop(0)
+        return {
+            "status": "ready",
+            "period": {"from": "2026-02-20", "to": "2026-02-26"},
+            "workouts": [
+                {
+                    "workout_id": "workout-1",
+                    "date": "2026-02-26",
+                    "sport_name": "hockey",
+                    "start": "2026-02-26T18:00:00Z",
+                    "end": "2026-02-26T19:30:00Z",
+                    "strain_score": 12.4,
+                    "kilojoules": 1210,
+                    "zone_durations": {
+                        "zone_zero_milli": 1000,
+                        "zone_one_milli": 2000,
+                        "zone_two_milli": 3000,
+                        "zone_three_milli": 4000,
+                        "zone_four_milli": 5000,
+                        "zone_five_milli": 6000,
+                    },
+                }
+            ],
+            "next_token": None,
         }
 
 
@@ -267,6 +359,20 @@ def test_recovery_timeout_maps_to_502_error_payload():
 
 
 @pytest.mark.smoke
+def test_recovery_reauthorization_maps_to_401_error_payload():
+    fake = FakeWhoopClient()
+    fake._recovery_exc = ReauthorizationRequiredError("Reauthorization required")
+    now_dt = datetime(2026, 2, 27, 10, 0, tzinfo=ZoneInfo("Europe/Moscow"))
+
+    with _client_with_fake_whoop(fake, now_dt) as client:
+        response = client.get("/recovery/today", headers={"X-API-Key": "test-api-key"})
+
+    assert response.status_code == 401
+    assert response.json()["status"] == "error"
+    assert response.json()["reason"] == "Reauthorization required"
+
+
+@pytest.mark.smoke
 def test_yesterday_cached_after_first_success():
     fake = FakeWhoopClient()
     now_dt = datetime(2026, 2, 27, 10, 0, tzinfo=ZoneInfo("Europe/Moscow"))
@@ -398,3 +504,58 @@ def test_week_returns_502_if_upstream_error_and_missing_cache():
     assert response.status_code == 502
     assert response.json()["status"] == "error"
     assert response.json()["reason"] == "Whoop API unavailable"
+
+
+@pytest.mark.smoke
+def test_cycles_is_cached_after_first_ready():
+    fake = FakeWhoopClient()
+    now_dt = datetime(2026, 3, 2, 10, 0, tzinfo=ZoneInfo("Europe/Moscow"))
+    query = "?start=2026-02-20T00:00:00%2B03:00&end=2026-02-26T23:59:59%2B03:00&limit=10"
+
+    with _client_with_fake_whoop(fake, now_dt) as client:
+        headers = {"X-API-Key": "test-api-key"}
+        first = client.get(f"/cycles{query}", headers=headers)
+        second = client.get(f"/cycles{query}", headers=headers)
+
+    assert first.status_code == 200
+    assert first.json()["cached"] is False
+    assert first.json()["timezone_offset"] == "+03:00"
+    assert second.status_code == 200
+    assert second.json()["cached"] is True
+    assert second.json()["timezone_offset"] == "+03:00"
+    assert fake.cycles_calls == 1
+
+
+@pytest.mark.smoke
+def test_cycles_rejects_invalid_next_token():
+    fake = FakeWhoopClient()
+    now_dt = datetime(2026, 3, 2, 10, 0, tzinfo=ZoneInfo("Europe/Moscow"))
+
+    with _client_with_fake_whoop(fake, now_dt) as client:
+        response = client.get(
+            "/cycles?start=2026-02-20T00:00:00%2B03:00&end=2026-02-26T23:59:59%2B03:00&next_token=bad-value",
+            headers={"X-API-Key": "test-api-key"},
+        )
+
+    assert response.status_code == 422
+
+
+@pytest.mark.smoke
+def test_workouts_is_cached_after_first_ready_and_passes_query_params():
+    fake = FakeWhoopClient()
+    now_dt = datetime(2026, 3, 2, 10, 0, tzinfo=ZoneInfo("Europe/Moscow"))
+    query = "?start=2026-02-20T00:00:00%2B03:00&end=2026-02-26T23:59:59%2B03:00&limit=5&next_token=abc"
+
+    with _client_with_fake_whoop(fake, now_dt) as client:
+        headers = {"X-API-Key": "test-api-key"}
+        first = client.get(f"/workouts{query}", headers=headers)
+        second = client.get(f"/workouts{query}", headers=headers)
+
+    assert first.status_code == 200
+    assert first.json()["cached"] is False
+    assert second.status_code == 200
+    assert second.json()["cached"] is True
+    assert fake.workouts_calls == 1
+    assert fake.last_workouts_args is not None
+    assert fake.last_workouts_args["limit"] == 5
+    assert fake.last_workouts_args["next_token"] == "abc"
