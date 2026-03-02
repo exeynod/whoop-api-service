@@ -420,7 +420,7 @@ class WhoopClient:
         end_utc = end.astimezone(timezone.utc)
         payload = await self._fetch_collection_page(
             profile_name=profile_name,
-            path="/v2/workout",
+            path="/v2/activity/workout",
             start_utc=start_utc,
             end_utc=end_utc,
             limit=limit,

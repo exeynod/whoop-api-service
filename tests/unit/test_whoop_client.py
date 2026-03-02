@@ -934,7 +934,7 @@ async def test_fetch_workouts_range_maps_payload_and_next_token():
     end = datetime(2026, 3, 2, 23, 59, tzinfo=msk)
 
     with respx.mock(assert_all_called=True) as mock:
-        mock.get(f"{settings.whoop_api_base_url}/v2/workout").respond(
+        mock.get(f"{settings.whoop_api_base_url}/v2/activity/workout").respond(
             200,
             json={
                 "records": [

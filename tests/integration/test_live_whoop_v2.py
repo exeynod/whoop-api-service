@@ -73,7 +73,7 @@ async def test_live_v2_collections_contract_shape():
         recovery_resp = await client.get(f"{base}/recovery", headers=headers, params=params)
         cycle_resp = await client.get(f"{base}/cycle", headers=headers, params=params)
         sleep_resp = await client.get(f"{base}/activity/sleep", headers=headers, params=params)
-        workout_resp = await client.get(f"{base}/workout", headers=headers, params=params)
+        workout_resp = await client.get(f"{base}/activity/workout", headers=headers, params=params)
 
     assert recovery_resp.status_code == 200, recovery_resp.text
     assert cycle_resp.status_code == 200, cycle_resp.text

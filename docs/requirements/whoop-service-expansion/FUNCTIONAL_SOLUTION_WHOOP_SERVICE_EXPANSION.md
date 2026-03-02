@@ -84,7 +84,7 @@
 ### 4.1 Источники данных
 
 - `GET /v2/cycle`
-- `GET /v2/workout`
+- `GET /v2/activity/workout`
 - `GET /v2/recovery`
 - `GET /v2/activity/sleep`
 
@@ -225,7 +225,7 @@
 
 ### 10.3 Integration (live, gated)
 
-- Проверка доступности `GET /v2/workout`.
+- Проверка доступности `GET /v2/activity/workout`.
 - История 30 дней на `/cycles`.
 - Проверка `sport_name` на реальных данных.
 

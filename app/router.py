@@ -47,7 +47,7 @@ def _whoop_error_response(exc: Exception) -> JSONResponse:
         payload = ErrorResponse(reason="Whoop API unavailable")
         return JSONResponse(status_code=502, content=payload.model_dump(exclude_none=True))
     if isinstance(exc, UnexpectedWhoopResponseError):
-        payload = ErrorResponse(reason="Unexpected Whoop response")
+        payload = ErrorResponse(reason="Unexpected Whoop response", detail=str(exc))
         return JSONResponse(status_code=502, content=payload.model_dump(exclude_none=True))
     payload = ErrorResponse(reason="Whoop API unavailable", detail=str(exc))
     return JSONResponse(status_code=502, content=payload.model_dump(exclude_none=True))
