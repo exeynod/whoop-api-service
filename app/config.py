@@ -8,7 +8,6 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    proxy_api_key: str = Field(default="change-me", alias="PROXY_API_KEY")
     whoop_client_id: str = Field(default="", alias="WHOOP_CLIENT_ID")
     whoop_client_secret: str = Field(default="", alias="WHOOP_CLIENT_SECRET")
     whoop_redirect_uri: str = Field(

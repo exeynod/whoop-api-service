@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -13,11 +14,19 @@ class FileCache:
         self._tz = ZoneInfo(timezone_name)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
-    def _path_for(self, endpoint: str, target_date: date) -> Path:
-        return self.cache_dir / f"{endpoint}_{target_date.isoformat()}.json"
+    def _profile_dir(self, profile_name: str) -> Path:
+        normalized = re.sub(r"[^A-Za-z0-9._-]+", "_", profile_name).strip("._")
+        if not normalized:
+            normalized = "unknown"
+        profile_dir = self.cache_dir / normalized
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        return profile_dir
 
-    def load_ready(self, endpoint: str, target_date: date) -> dict | None:
-        path = self._path_for(endpoint, target_date)
+    def _path_for(self, profile_name: str, endpoint: str, target_date: date) -> Path:
+        return self._profile_dir(profile_name) / f"{endpoint}_{target_date.isoformat()}.json"
+
+    def load_ready(self, profile_name: str, endpoint: str, target_date: date) -> dict | None:
+        path = self._path_for(profile_name, endpoint, target_date)
         if not path.exists():
             return None
 
@@ -30,11 +39,11 @@ class FileCache:
             return None
         return payload
 
-    def save_ready(self, endpoint: str, target_date: date, payload: dict) -> bool:
+    def save_ready(self, profile_name: str, endpoint: str, target_date: date, payload: dict) -> bool:
         if payload.get("status") != "ready":
             return False
 
-        path = self._path_for(endpoint, target_date)
+        path = self._path_for(profile_name, endpoint, target_date)
         temp_path = path.with_suffix(".tmp")
         temp_path.write_text(
             json.dumps(payload, ensure_ascii=True, indent=2),
@@ -47,7 +56,7 @@ class FileCache:
         current_day = today or datetime.now(self._tz).date()
         deleted = 0
 
-        for file_path in self.cache_dir.glob("*.json"):
+        for file_path in self.cache_dir.rglob("*.json"):
             extracted_date = self._extract_date(file_path)
             if extracted_date is None:
                 continue

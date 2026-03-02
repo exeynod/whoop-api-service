@@ -2,12 +2,23 @@
 
 FastAPI proxy service between OpenClaw agent and WHOOP Developer API v2.
 
+## Multi-User Roadmap
+
+Step 1 is documented: profile-based multi-user architecture, where
+`/secrets/whoop_tokens.json` stores multiple profiles and each profile has:
+
+- its own Whoop OAuth token set;
+- its own API token identity (for `X-API-Key` routing).
+
+Technical design:
+[docs/MULTI_USER_TECHNICAL_DESIGN.md](/Users/exy/pet_projects/whoop_api_service/docs/MULTI_USER_TECHNICAL_DESIGN.md)
+
 ## Features
 
-- API key auth (`X-API-Key`) for all data routes
+- Profile-based API auth (`X-API-Key`) for all data routes
 - OAuth2 authorization code flow (`/auth/init`, `/auth/callback`)
-- Token persistence in `/secrets/whoop_tokens.json` with auto refresh
-- File cache in `/cache` (only `ready` responses)
+- Token persistence in `/secrets/whoop_tokens.json` with auto refresh per profile
+- File cache in `/cache/<profile>/...` (only `ready` responses)
 - Daily cache cleanup on startup and at 03:00 MSK
 - Local smoke tests, unit tests, and gated live integration tests
 
@@ -15,7 +26,6 @@ FastAPI proxy service between OpenClaw agent and WHOOP Developer API v2.
 
 Copy `.env.example` to `.env` and set values:
 
-- `PROXY_API_KEY`
 - `WHOOP_CLIENT_ID`
 - `WHOOP_CLIENT_SECRET`
 - `WHOOP_REDIRECT_URI`
@@ -25,6 +35,9 @@ Copy `.env.example` to `.env` and set values:
 - `WHOOP_HTTP_LOG_BODY_MAX_CHARS=4000`
 - `WHOOP_HTTP_LOG_REDACT_SENSITIVE=true`
 - `WHOOP_HTTP_LOG_FILE_DIR=/tmp`
+
+`X-API-Key` is resolved from profile records in `/secrets/whoop_tokens.json`.
+Global API key in `.env` is not used.
 
 ## Local Run
 

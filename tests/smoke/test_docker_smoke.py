@@ -14,7 +14,6 @@ def test_docker_container_smoke_healthcheck():
         pytest.skip("Set RUN_DOCKER_SMOKE=1 to run Docker smoke test")
 
     env = os.environ.copy()
-    env.setdefault("PROXY_API_KEY", "test-api-key")
     env.setdefault("WHOOP_CLIENT_ID", "client-id")
     env.setdefault("WHOOP_CLIENT_SECRET", "client-secret")
     env.setdefault("WHOOP_REDIRECT_URI", "http://127.0.0.1:8001/auth/callback")
@@ -26,7 +25,6 @@ def test_docker_container_smoke_healthcheck():
         env_path.write_text(
             "\n".join(
                 [
-                    "PROXY_API_KEY=test-api-key",
                     "WHOOP_CLIENT_ID=client-id",
                     "WHOOP_CLIENT_SECRET=client-secret",
                     "WHOOP_REDIRECT_URI=http://127.0.0.1:8001/auth/callback",

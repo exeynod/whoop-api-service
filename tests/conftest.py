@@ -27,7 +27,6 @@ def tmp_secrets_dir(tmp_path: Path) -> Path:
 
 @pytest.fixture(autouse=True)
 def app_env(monkeypatch: pytest.MonkeyPatch, tmp_cache_dir: Path, tmp_secrets_dir: Path) -> None:
-    monkeypatch.setenv("PROXY_API_KEY", "test-api-key")
     monkeypatch.setenv("WHOOP_CLIENT_ID", "client-id")
     monkeypatch.setenv("WHOOP_CLIENT_SECRET", "client-secret")
     monkeypatch.setenv("WHOOP_REDIRECT_URI", "http://127.0.0.1:8001/auth/callback")

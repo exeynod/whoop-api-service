@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse
 
 from app.cache import FileCache
 from app.config import Settings, get_settings
-from app.deps import get_cache, get_rate_limiter, get_whoop_client, verify_api_key
+from app.deps import get_cache, get_rate_limiter, get_whoop_client, resolve_profile_name
 from app.models import ErrorResponse, PendingResponse, RecoveryReadyResponse, WeekResponse, YesterdayReadyResponse
 from app.rate_limiter import EndpointRateLimiter
 from app.whoop_client import (
@@ -20,7 +20,7 @@ from app.whoop_client import (
     WhoopUnavailableError,
 )
 
-router = APIRouter(tags=["whoop"], dependencies=[Depends(verify_api_key)])
+router = APIRouter(tags=["whoop"])
 
 
 def _now_msk(settings: Settings) -> datetime:
@@ -50,6 +50,7 @@ def _whoop_error_response(exc: Exception) -> JSONResponse:
     responses={502: {"model": ErrorResponse}},
 )
 async def recovery_today(
+    profile_name: str = Depends(resolve_profile_name),
     settings: Settings = Depends(get_settings),
     cache: FileCache = Depends(get_cache),
     rate_limiter: EndpointRateLimiter = Depends(get_rate_limiter),
@@ -58,28 +59,29 @@ async def recovery_today(
     now = _now_msk(settings)
     today = now.date()
 
-    cached = cache.load_ready("recovery", today)
+    cache_key = f"{profile_name}:recovery_today"
+    cached = cache.load_ready(profile_name, "recovery", today)
     if cached:
         cached["cached"] = True
-        rate_limiter.pop_pending("recovery_today")
+        rate_limiter.pop_pending(cache_key)
         return cached
 
-    throttled_pending = rate_limiter.get_pending_if_limited("recovery_today", now)
+    throttled_pending = rate_limiter.get_pending_if_limited(cache_key, now)
     if throttled_pending:
         return throttled_pending
 
     try:
-        payload = await whoop_client.fetch_recovery(today)
+        payload = await whoop_client.fetch_recovery(profile_name, today)
     except Exception as exc:
         return _whoop_error_response(exc)
 
     if payload.get("status") == "ready":
         payload["cached"] = False
-        cache.save_ready("recovery", today, payload)
-        rate_limiter.pop_pending("recovery_today")
+        cache.save_ready(profile_name, "recovery", today, payload)
+        rate_limiter.pop_pending(cache_key)
         return payload
 
-    rate_limiter.remember_pending("recovery_today", now, payload)
+    rate_limiter.remember_pending(cache_key, now, payload)
     return payload
 
 
@@ -89,18 +91,19 @@ async def recovery_today(
     responses={502: {"model": ErrorResponse}},
 )
 async def day_yesterday(
+    profile_name: str = Depends(resolve_profile_name),
     settings: Settings = Depends(get_settings),
     cache: FileCache = Depends(get_cache),
     whoop_client: WhoopClient = Depends(get_whoop_client),
 ):
     yesterday = (_now_msk(settings) - timedelta(days=1)).date()
-    cached = cache.load_ready("day", yesterday)
+    cached = cache.load_ready(profile_name, "day", yesterday)
     if cached:
         cached["cached"] = True
         return cached
 
     try:
-        payload = await whoop_client.fetch_yesterday_snapshot(yesterday)
+        payload = await whoop_client.fetch_yesterday_snapshot(profile_name, yesterday)
     except Exception as exc:
         return _whoop_error_response(exc)
 
@@ -108,7 +111,7 @@ async def day_yesterday(
         return _whoop_error_response(UnexpectedWhoopResponseError("Expected ready payload"))
 
     payload["cached"] = False
-    cache.save_ready("day", yesterday, payload)
+    cache.save_ready(profile_name, "day", yesterday, payload)
     return payload
 
 
@@ -118,6 +121,7 @@ async def day_yesterday(
     responses={502: {"model": ErrorResponse}},
 )
 async def week(
+    profile_name: str = Depends(resolve_profile_name),
     settings: Settings = Depends(get_settings),
     cache: FileCache = Depends(get_cache),
     whoop_client: WhoopClient = Depends(get_whoop_client),
@@ -128,18 +132,18 @@ async def week(
     days: list[dict] = []
     for offset in range(7):
         target_date = start_date + timedelta(days=offset)
-        cached = cache.load_ready("week", target_date)
+        cached = cache.load_ready(profile_name, "week", target_date)
         if cached:
             days.append(cached)
             continue
 
         try:
-            payload = await whoop_client.fetch_week_day(target_date)
+            payload = await whoop_client.fetch_week_day(profile_name, target_date)
         except Exception as exc:
             return _whoop_error_response(exc)
 
         if payload.get("status") == "ready":
-            cache.save_ready("week", target_date, payload)
+            cache.save_ready(profile_name, "week", target_date, payload)
         days.append(payload)
 
     return {

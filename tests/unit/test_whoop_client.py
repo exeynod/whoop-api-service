@@ -7,18 +7,41 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 import respx
-from httpx import Response
 
 from app.config import get_settings
 from app.whoop_client import ReauthorizationRequiredError, WhoopClient
 
 
-def _write_tokens(path, *, access_token: str, refresh_token: str, expires_at: datetime, refresh_expires_at: datetime):
+def _write_profile_file(
+    path,
+    *,
+    profile_name: str,
+    api_token: str,
+    access_token: str,
+    refresh_token: str,
+    expires_at: datetime,
+    refresh_expires_at: datetime | None,
+    active: bool = True,
+):
     payload = {
-        "access_token": access_token,
-        "refresh_token": refresh_token,
-        "expires_at": expires_at.isoformat(),
-        "refresh_expires_at": refresh_expires_at.isoformat(),
+        "version": 2,
+        "profiles": {
+            profile_name: {
+                "api_token": api_token,
+                "whoop": {
+                    "access_token": access_token,
+                    "refresh_token": refresh_token,
+                    "expires_at": expires_at.isoformat(),
+                    "refresh_expires_at": refresh_expires_at.isoformat() if refresh_expires_at else None,
+                },
+                "meta": {
+                    "active": active,
+                    "whoop_user_id": None,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                },
+            }
+        },
     }
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
@@ -52,9 +75,39 @@ async def test_tokens_valid_false_without_file(tmp_secrets_dir):
 
 
 @pytest.mark.unit
-@pytest.mark.asyncio
-async def test_exchange_code_saves_tokens():
+def test_resolve_profile_name_by_api_token():
     settings = get_settings()
+    now = datetime.now(timezone.utc)
+    _write_profile_file(
+        settings.token_path,
+        profile_name="denis",
+        api_token="api-denis",
+        access_token="access",
+        refresh_token="refresh",
+        expires_at=now + timedelta(hours=1),
+        refresh_expires_at=now + timedelta(days=7),
+    )
+
+    client = WhoopClient(settings)
+    assert client.resolve_profile_name("api-denis") == "denis"
+    assert client.resolve_profile_name("wrong") is None
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_exchange_code_saves_tokens_for_target_profile():
+    settings = get_settings()
+    now = datetime.now(timezone.utc)
+    _write_profile_file(
+        settings.token_path,
+        profile_name="denis",
+        api_token="api-denis",
+        access_token="old-access",
+        refresh_token="old-refresh",
+        expires_at=now + timedelta(hours=1),
+        refresh_expires_at=now + timedelta(days=7),
+    )
+
     client = WhoopClient(settings)
 
     with respx.mock(assert_all_called=True) as mock:
@@ -68,12 +121,13 @@ async def test_exchange_code_saves_tokens():
             },
         )
 
-        await client.exchange_code_for_tokens("auth-code")
+        await client.exchange_code_for_tokens(profile_name="denis", code="auth-code")
 
     raw = json.loads(settings.token_path.read_text(encoding="utf-8"))
-    assert raw["access_token"] == "new-access"
-    assert raw["refresh_token"] == "new-refresh"
-    assert client.tokens_valid is True
+    profile = raw["profiles"]["denis"]
+    assert profile["api_token"] == "api-denis"
+    assert profile["whoop"]["access_token"] == "new-access"
+    assert profile["whoop"]["refresh_token"] == "new-refresh"
 
 
 @pytest.mark.unit
@@ -82,8 +136,10 @@ async def test_fetch_recovery_refreshes_expired_access_token():
     settings = get_settings()
     client = WhoopClient(settings)
     now = datetime.now(timezone.utc)
-    _write_tokens(
+    _write_profile_file(
         settings.token_path,
+        profile_name="denis",
+        api_token="api-denis",
         access_token="expired-access",
         refresh_token="refresh-token",
         expires_at=now - timedelta(seconds=10),
@@ -118,12 +174,12 @@ async def test_fetch_recovery_refreshes_expired_access_token():
             },
         )
 
-        result = await client.fetch_recovery(date(2026, 2, 27))
+        result = await client.fetch_recovery("denis", date(2026, 2, 27))
 
     assert result["status"] == "ready"
     assert result["recovery_score"] == 74
     saved = json.loads(settings.token_path.read_text(encoding="utf-8"))
-    assert saved["access_token"] == "fresh-access"
+    assert saved["profiles"]["denis"]["whoop"]["access_token"] == "fresh-access"
 
 
 @pytest.mark.unit
@@ -132,8 +188,10 @@ async def test_fetch_recovery_returns_pending_when_not_scored():
     settings = get_settings()
     client = WhoopClient(settings)
     now = datetime.now(timezone.utc)
-    _write_tokens(
+    _write_profile_file(
         settings.token_path,
+        profile_name="denis",
+        api_token="api-denis",
         access_token="access",
         refresh_token="refresh",
         expires_at=now + timedelta(hours=1),
@@ -154,7 +212,7 @@ async def test_fetch_recovery_returns_pending_when_not_scored():
             },
         )
 
-        result = await client.fetch_recovery(date(2026, 2, 27))
+        result = await client.fetch_recovery("denis", date(2026, 2, 27))
 
     assert result == {
         "status": "pending",
@@ -168,8 +226,10 @@ async def test_fetch_yesterday_snapshot_maps_cycle_and_sleep_payloads():
     settings = get_settings()
     client = WhoopClient(settings)
     now = datetime.now(timezone.utc)
-    _write_tokens(
+    _write_profile_file(
         settings.token_path,
+        profile_name="denis",
+        api_token="api-denis",
         access_token="access",
         refresh_token="refresh",
         expires_at=now + timedelta(hours=1),
@@ -218,7 +278,7 @@ async def test_fetch_yesterday_snapshot_maps_cycle_and_sleep_payloads():
             },
         )
 
-        result = await client.fetch_yesterday_snapshot(date(2026, 2, 26))
+        result = await client.fetch_yesterday_snapshot("denis", date(2026, 2, 26))
 
     assert result["status"] == "ready"
     assert result["strain"]["score"] == 14.2
@@ -233,8 +293,10 @@ async def test_fetch_week_day_returns_missing_when_any_source_absent():
     settings = get_settings()
     client = WhoopClient(settings)
     now = datetime.now(timezone.utc)
-    _write_tokens(
+    _write_profile_file(
         settings.token_path,
+        profile_name="denis",
+        api_token="api-denis",
         access_token="access",
         refresh_token="refresh",
         expires_at=now + timedelta(hours=1),
@@ -246,7 +308,7 @@ async def test_fetch_week_day_returns_missing_when_any_source_absent():
         mock.get(f"{settings.whoop_api_base_url}/v2/recovery").respond(200, json={"records": []})
         mock.get(f"{settings.whoop_api_base_url}/v2/activity/sleep").respond(200, json={"records": []})
 
-        result = await client.fetch_week_day(date(2026, 2, 25))
+        result = await client.fetch_week_day("denis", date(2026, 2, 25))
 
     assert result == {"date": "2026-02-25", "status": "missing"}
 
@@ -257,8 +319,10 @@ async def test_fetch_recovery_raises_reauthorization_when_refresh_expired():
     settings = get_settings()
     client = WhoopClient(settings)
     now = datetime.now(timezone.utc)
-    _write_tokens(
+    _write_profile_file(
         settings.token_path,
+        profile_name="denis",
+        api_token="api-denis",
         access_token="access",
         refresh_token="refresh",
         expires_at=now - timedelta(hours=1),
@@ -266,7 +330,7 @@ async def test_fetch_recovery_raises_reauthorization_when_refresh_expired():
     )
 
     with pytest.raises(ReauthorizationRequiredError):
-        await client.fetch_recovery(date(2026, 2, 27))
+        await client.fetch_recovery("denis", date(2026, 2, 27))
 
 
 @pytest.mark.unit
@@ -287,6 +351,16 @@ async def test_ping_returns_true_when_upstream_responds_even_unauthorized():
 @pytest.mark.asyncio
 async def test_whoop_http_logging_contains_request_and_response_events(caplog: pytest.LogCaptureFixture):
     settings = get_settings()
+    now = datetime.now(timezone.utc)
+    _write_profile_file(
+        settings.token_path,
+        profile_name="denis",
+        api_token="api-denis",
+        access_token="old-access",
+        refresh_token="old-refresh",
+        expires_at=now + timedelta(hours=1),
+        refresh_expires_at=now + timedelta(days=7),
+    )
     client = WhoopClient(settings)
 
     caplog.set_level(logging.INFO, logger="app.whoop_client")
@@ -299,7 +373,7 @@ async def test_whoop_http_logging_contains_request_and_response_events(caplog: p
                 "expires_in": 3600,
             },
         )
-        await client.exchange_code_for_tokens("auth-code-123")
+        await client.exchange_code_for_tokens(profile_name="denis", code="auth-code-123")
 
     events = [json.loads(record.message) for record in caplog.records if record.name == "app.whoop_client"]
     event_types = [event.get("event") for event in events]

@@ -10,14 +10,6 @@ from app.rate_limiter import EndpointRateLimiter
 from app.whoop_client import WhoopClient
 
 
-def verify_api_key(
-    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
-    settings: Settings = Depends(get_settings),
-) -> None:
-    if not x_api_key or x_api_key != settings.proxy_api_key:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
-
-
 @lru_cache(maxsize=1)
 def get_cache() -> FileCache:
     settings = get_settings()
@@ -38,3 +30,16 @@ def get_rate_limiter() -> EndpointRateLimiter:
 def get_whoop_client() -> WhoopClient:
     settings = get_settings()
     return WhoopClient(settings=settings)
+
+
+def resolve_profile_name(
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+    whoop_client: WhoopClient = Depends(get_whoop_client),
+) -> str:
+    if not x_api_key:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
+
+    profile_name = whoop_client.resolve_profile_name(api_token=x_api_key)
+    if profile_name is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
+    return profile_name

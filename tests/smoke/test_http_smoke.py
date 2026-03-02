@@ -22,6 +22,8 @@ class FakeWhoopClient:
         self.recovery_calls = 0
         self.day_calls = 0
         self.week_calls = 0
+        self.profile_resolve_calls = 0
+        self.profile_map = {"test-api-key": "denis"}
         self._recovery_payloads: list[dict] = []
         self._day_payloads: list[dict] = []
         self._week_payloads: list[dict] = []
@@ -29,17 +31,23 @@ class FakeWhoopClient:
         self._day_exc: Exception | None = None
         self._week_exc: Exception | None = None
 
+    def resolve_profile_name(self, api_token: str) -> str | None:
+        self.profile_resolve_calls += 1
+        return self.profile_map.get(api_token)
+
     def build_authorization_url(self, state: str) -> str:
         return f"https://example.test/oauth?state={state}"
 
-    async def exchange_code_for_tokens(self, code: str) -> None:
+    async def exchange_code_for_tokens(self, profile_name: str, code: str) -> None:
+        _ = profile_name
         _ = code
 
     async def ping(self, timeout_seconds: float) -> bool:
         _ = timeout_seconds
         return True
 
-    async def fetch_recovery(self, target_date: date) -> dict:
+    async def fetch_recovery(self, profile_name: str, target_date: date) -> dict:
+        _ = profile_name
         _ = target_date
         self.recovery_calls += 1
         if self._recovery_exc:
@@ -51,7 +59,8 @@ class FakeWhoopClient:
             "reason": "Sleep not yet complete. Recovery will be available after wake.",
         }
 
-    async def fetch_yesterday_snapshot(self, target_date: date) -> dict:
+    async def fetch_yesterday_snapshot(self, profile_name: str, target_date: date) -> dict:
+        _ = profile_name
         _ = target_date
         self.day_calls += 1
         if self._day_exc:
@@ -81,7 +90,8 @@ class FakeWhoopClient:
             },
         }
 
-    async def fetch_week_day(self, target_date: date) -> dict:
+    async def fetch_week_day(self, profile_name: str, target_date: date) -> dict:
+        _ = profile_name
         _ = target_date
         self.week_calls += 1
         if self._week_exc:
@@ -155,8 +165,8 @@ def test_auth_routes_are_public():
     now_dt = datetime(2026, 2, 27, 10, 0, tzinfo=ZoneInfo("Europe/Moscow"))
 
     with _client_with_fake_whoop(fake, now_dt) as client:
-        init_response = client.get("/auth/init", follow_redirects=False)
-        callback_response = client.get("/auth/callback", params={"code": "abc"})
+        init_response = client.get("/auth/init", params={"profile": "denis"}, follow_redirects=False)
+        callback_response = client.get("/auth/callback", params={"code": "abc", "profile": "denis"})
 
     assert init_response.status_code == 307
     assert callback_response.status_code == 200
@@ -213,7 +223,7 @@ def test_recovery_is_cached_after_first_ready(tmp_cache_dir):
     assert second.json()["cached"] is True
     assert fake.recovery_calls == 1
 
-    cache_file = tmp_cache_dir / "recovery_2026-02-27.json"
+    cache_file = tmp_cache_dir / "denis" / "recovery_2026-02-27.json"
     assert cache_file.exists()
     cached_payload = json.loads(cache_file.read_text(encoding="utf-8"))
     assert cached_payload["status"] == "ready"
@@ -303,7 +313,9 @@ def test_week_partial_cache_merge(tmp_cache_dir):
         "sleep_score": 84,
         "sleep_hours": 7.8,
     }
-    (tmp_cache_dir / "week_2026-02-20.json").write_text(json.dumps(cached_day), encoding="utf-8")
+    profile_dir = tmp_cache_dir / "denis"
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    (profile_dir / "week_2026-02-20.json").write_text(json.dumps(cached_day), encoding="utf-8")
 
     fake._week_payloads = [
         {

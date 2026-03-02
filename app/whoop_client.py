@@ -10,7 +10,7 @@ from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
 
 import httpx
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.config import Settings
 
@@ -80,6 +80,24 @@ class TokenBundle(BaseModel):
     refresh_expires_at: datetime | None = None
 
 
+class ProfileMeta(BaseModel):
+    active: bool = True
+    whoop_user_id: int | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class ProfileSecrets(BaseModel):
+    api_token: str
+    whoop: TokenBundle
+    meta: ProfileMeta = Field(default_factory=ProfileMeta)
+
+
+class ProfileTokenFile(BaseModel):
+    version: int = 2
+    profiles: dict[str, ProfileSecrets]
+
+
 class WhoopClient:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
@@ -94,12 +112,28 @@ class WhoopClient:
 
     @property
     def tokens_valid(self) -> bool:
-        tokens = self._load_tokens()
-        if tokens is None:
+        profile_file = self._load_profile_file()
+        if profile_file is None:
             return False
-        if self._is_refresh_expired(tokens):
-            return False
-        return True
+
+        for _, profile in profile_file.profiles.items():
+            if not profile.meta.active:
+                continue
+            if not self._is_refresh_expired(profile.whoop):
+                return True
+        return False
+
+    def resolve_profile_name(self, api_token: str) -> str | None:
+        profile_file = self._load_profile_file()
+        if profile_file is None:
+            return None
+
+        for profile_name, profile in profile_file.profiles.items():
+            if not profile.meta.active:
+                continue
+            if profile.api_token == api_token:
+                return profile_name
+        return None
 
     def build_authorization_url(self, state: str) -> str:
         params = {
@@ -111,7 +145,7 @@ class WhoopClient:
         }
         return f"{self.settings.whoop_oauth_authorize_url}?{urlencode(params)}"
 
-    async def exchange_code_for_tokens(self, code: str) -> None:
+    async def exchange_code_for_tokens(self, profile_name: str, code: str) -> None:
         token_payload = {
             "grant_type": "authorization_code",
             "code": code,
@@ -122,7 +156,7 @@ class WhoopClient:
 
         response = await self._oauth_post(token_payload)
         token_bundle = self._bundle_from_oauth_response(response)
-        self._save_tokens(token_bundle)
+        self._save_profile_tokens(profile_name=profile_name, bundle=token_bundle)
 
     async def ping(self, timeout_seconds: float) -> bool:
         url = f"{self.settings.whoop_api_base_url.rstrip('/')}/v2/user/profile/basic"
@@ -149,10 +183,10 @@ class WhoopClient:
             )
             return False
 
-    async def fetch_recovery(self, target_date: date) -> RecoveryResult:
-        _ = await self._ensure_access_token()
+    async def fetch_recovery(self, profile_name: str, target_date: date) -> RecoveryResult:
+        _ = await self._ensure_access_token(profile_name=profile_name)
         start_utc, end_utc = self._day_bounds_utc(target_date)
-        records = await self._fetch_collection("/v2/recovery", start_utc, end_utc)
+        records = await self._fetch_collection(profile_name, "/v2/recovery", start_utc, end_utc)
 
         if not records:
             return {
@@ -188,13 +222,13 @@ class WhoopClient:
             "resting_hr_bpm": int(round(float(resting_hr))),
         }
 
-    async def fetch_yesterday_snapshot(self, target_date: date) -> YesterdayResult:
-        _ = await self._ensure_access_token()
+    async def fetch_yesterday_snapshot(self, profile_name: str, target_date: date) -> YesterdayResult:
+        _ = await self._ensure_access_token(profile_name=profile_name)
         start_utc, end_utc = self._day_bounds_utc(target_date)
 
         cycle_records, sleep_records = await asyncio.gather(
-            self._fetch_collection("/v2/cycle", start_utc, end_utc),
-            self._fetch_collection("/v2/activity/sleep", start_utc, end_utc),
+            self._fetch_collection(profile_name, "/v2/cycle", start_utc, end_utc),
+            self._fetch_collection(profile_name, "/v2/activity/sleep", start_utc, end_utc),
         )
 
         cycle = self._pick_scored_cycle(cycle_records, target_date)
@@ -210,14 +244,14 @@ class WhoopClient:
             "sleep": self._map_sleep(sleep),
         }
 
-    async def fetch_week_day(self, target_date: date) -> WeekDayResult:
-        _ = await self._ensure_access_token()
+    async def fetch_week_day(self, profile_name: str, target_date: date) -> WeekDayResult:
+        _ = await self._ensure_access_token(profile_name=profile_name)
         start_utc, end_utc = self._day_bounds_utc(target_date)
 
         cycle_records, recovery_records, sleep_records = await asyncio.gather(
-            self._fetch_collection("/v2/cycle", start_utc, end_utc),
-            self._fetch_collection("/v2/recovery", start_utc, end_utc),
-            self._fetch_collection("/v2/activity/sleep", start_utc, end_utc),
+            self._fetch_collection(profile_name, "/v2/cycle", start_utc, end_utc),
+            self._fetch_collection(profile_name, "/v2/recovery", start_utc, end_utc),
+            self._fetch_collection(profile_name, "/v2/activity/sleep", start_utc, end_utc),
         )
 
         cycle = self._pick_scored_cycle(cycle_records, target_date)
@@ -259,19 +293,19 @@ class WhoopClient:
             "sleep_hours": self._millis_to_hours(stage_summary.get("total_in_bed_time_milli")),
         }
 
-    async def _ensure_access_token(self, force_refresh: bool = False) -> str:
+    async def _ensure_access_token(self, profile_name: str, force_refresh: bool = False) -> str:
         async with self._token_lock:
-            tokens = self._load_tokens()
+            tokens = self._load_profile_tokens(profile_name)
             if tokens is None:
                 raise ReauthorizationRequiredError("Reauthorization required")
             if self._is_refresh_expired(tokens):
                 raise ReauthorizationRequiredError("Reauthorization required")
 
             if force_refresh or tokens.expires_at <= datetime.now(timezone.utc):
-                tokens = await self._refresh_token(tokens)
+                tokens = await self._refresh_token(profile_name, tokens)
             return tokens.access_token
 
-    async def _refresh_token(self, tokens: TokenBundle) -> TokenBundle:
+    async def _refresh_token(self, profile_name: str, tokens: TokenBundle) -> TokenBundle:
         if self._is_refresh_expired(tokens):
             raise ReauthorizationRequiredError("Reauthorization required")
 
@@ -285,7 +319,7 @@ class WhoopClient:
 
         response = await self._oauth_post(token_payload)
         refreshed = self._bundle_from_oauth_response(response, current=tokens)
-        self._save_tokens(refreshed)
+        self._save_profile_tokens(profile_name=profile_name, bundle=refreshed)
         return refreshed
 
     async def _oauth_post(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -348,12 +382,14 @@ class WhoopClient:
 
     async def _fetch_collection(
         self,
+        profile_name: str,
         path: str,
         start_utc: datetime,
         end_utc: datetime,
         limit: int = 25,
     ) -> list[dict[str, Any]]:
         payload = await self._authorized_get(
+            profile_name=profile_name,
             path=path,
             params={
                 "start": self._to_zulu(start_utc),
@@ -372,13 +408,18 @@ class WhoopClient:
                 normalized.append(item)
         return normalized
 
-    async def _authorized_get(self, path: str, params: dict[str, str]) -> dict[str, Any]:
-        access_token = await self._ensure_access_token()
-        response = await self._raw_get(path=path, access_token=access_token, params=params)
+    async def _authorized_get(self, profile_name: str, path: str, params: dict[str, str]) -> dict[str, Any]:
+        access_token = await self._ensure_access_token(profile_name=profile_name)
+        response = await self._raw_get(profile_name=profile_name, path=path, access_token=access_token, params=params)
 
         if response.status_code == 401:
-            refreshed_token = await self._ensure_access_token(force_refresh=True)
-            response = await self._raw_get(path=path, access_token=refreshed_token, params=params)
+            refreshed_token = await self._ensure_access_token(profile_name=profile_name, force_refresh=True)
+            response = await self._raw_get(
+                profile_name=profile_name,
+                path=path,
+                access_token=refreshed_token,
+                params=params,
+            )
 
         if response.status_code == 401:
             raise ReauthorizationRequiredError("Reauthorization required")
@@ -396,7 +437,13 @@ class WhoopClient:
             raise UnexpectedWhoopResponseError("Unexpected Whoop response")
         return payload
 
-    async def _raw_get(self, path: str, access_token: str, params: dict[str, str]) -> httpx.Response:
+    async def _raw_get(
+        self,
+        profile_name: str,
+        path: str,
+        access_token: str,
+        params: dict[str, str],
+    ) -> httpx.Response:
         timeout = httpx.Timeout(self.settings.whoop_timeout_seconds)
         url = f"{self.settings.whoop_api_base_url.rstrip('/')}{path}"
         headers = {"Authorization": f"Bearer {access_token}"}
@@ -406,6 +453,7 @@ class WhoopClient:
             url=url,
             headers=headers,
             params=params,
+            profile_name=profile_name,
         )
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
@@ -416,6 +464,7 @@ class WhoopClient:
                 method="GET",
                 url=url,
                 error=f"TimeoutException: {exc}",
+                profile_name=profile_name,
             )
             raise WhoopTimeoutError("Connection timeout after 10s") from exc
         except httpx.RequestError as exc:
@@ -424,6 +473,7 @@ class WhoopClient:
                 method="GET",
                 url=url,
                 error=f"RequestError: {exc}",
+                profile_name=profile_name,
             )
             raise WhoopUnavailableError("Whoop API unavailable") from exc
 
@@ -434,6 +484,7 @@ class WhoopClient:
             status_code=response.status_code,
             headers=dict(response.headers),
             body_text=response.text,
+            profile_name=profile_name,
         )
         return response
 
@@ -472,7 +523,7 @@ class WhoopClient:
             refresh_expires_at=refresh_expires_at,
         )
 
-    def _load_tokens(self) -> TokenBundle | None:
+    def _load_profile_file(self) -> ProfileTokenFile | None:
         token_path = self.settings.token_path
         if not token_path.exists():
             return None
@@ -486,21 +537,60 @@ class WhoopClient:
             return None
 
         try:
-            bundle = TokenBundle.model_validate(payload)
+            profile_file = ProfileTokenFile.model_validate(payload)
         except ValueError:
             return None
 
+        for _, profile in profile_file.profiles.items():
+            self._normalize_bundle_tz(profile.whoop)
+        return profile_file
+
+    def _load_profile_tokens(self, profile_name: str) -> TokenBundle | None:
+        profile_file = self._load_profile_file()
+        if profile_file is None:
+            return None
+        profile = profile_file.profiles.get(profile_name)
+        if profile is None:
+            return None
+        if not profile.meta.active:
+            return None
+        return profile.whoop
+
+    def _save_profile_tokens(self, profile_name: str, bundle: TokenBundle) -> None:
+        profile_file = self._load_profile_file()
+        if profile_file is None:
+            profile_file = ProfileTokenFile(version=2, profiles={})
+
+        now = datetime.now(timezone.utc)
+        current = profile_file.profiles.get(profile_name)
+        if current is None:
+            meta = ProfileMeta(active=True, created_at=now, updated_at=now)
+            api_token = ""
+        else:
+            meta = current.meta
+            if meta.created_at is None:
+                meta.created_at = now
+            meta.updated_at = now
+            api_token = current.api_token
+
+        profile_file.profiles[profile_name] = ProfileSecrets(
+            api_token=api_token,
+            whoop=bundle,
+            meta=meta,
+        )
+        self._save_profile_file(profile_file)
+
+    def _save_profile_file(self, profile_file: ProfileTokenFile) -> None:
+        payload = profile_file.model_dump(mode="json")
+        raw = json.dumps(payload, ensure_ascii=True, indent=2)
+        token_path = self.settings.token_path
+        self._atomic_write_text(token_path, raw)
+
+    def _normalize_bundle_tz(self, bundle: TokenBundle) -> None:
         if bundle.expires_at.tzinfo is None:
             bundle.expires_at = bundle.expires_at.replace(tzinfo=timezone.utc)
         if bundle.refresh_expires_at and bundle.refresh_expires_at.tzinfo is None:
             bundle.refresh_expires_at = bundle.refresh_expires_at.replace(tzinfo=timezone.utc)
-        return bundle
-
-    def _save_tokens(self, bundle: TokenBundle) -> None:
-        payload = bundle.model_dump(mode="json")
-        raw = json.dumps(payload, ensure_ascii=True, indent=2)
-        token_path = self.settings.token_path
-        self._atomic_write_text(token_path, raw)
 
     @staticmethod
     def _atomic_write_text(path: Path, content: str) -> None:
@@ -708,18 +798,20 @@ class WhoopClient:
         headers: dict[str, str] | None = None,
         params: dict[str, str] | None = None,
         data: dict[str, Any] | None = None,
+        profile_name: str | None = None,
     ) -> None:
-        self._log_http_event(
-            event={
-                "event": "whoop_http_request",
-                "channel": channel,
-                "method": method,
-                "url": url,
-                "headers": self._sanitize_mapping(headers or {}),
-                "params": self._sanitize_mapping(params or {}),
-                "data": self._sanitize_mapping(data or {}),
-            }
-        )
+        event = {
+            "event": "whoop_http_request",
+            "channel": channel,
+            "method": method,
+            "url": url,
+            "headers": self._sanitize_mapping(headers or {}),
+            "params": self._sanitize_mapping(params or {}),
+            "data": self._sanitize_mapping(data or {}),
+        }
+        if profile_name is not None:
+            event["profile"] = profile_name
+        self._log_http_event(event=event)
 
     def _log_http_response(
         self,
@@ -729,31 +821,41 @@ class WhoopClient:
         status_code: int,
         headers: dict[str, str] | None,
         body_text: str,
+        profile_name: str | None = None,
     ) -> None:
         body = self._sanitize_response_body(body_text)
-        self._log_http_event(
-            event={
-                "event": "whoop_http_response",
-                "channel": channel,
-                "method": method,
-                "url": url,
-                "status_code": status_code,
-                "headers": self._sanitize_mapping(headers or {}),
-                "body": body,
-                "body_truncated": len(body_text) > self._http_log_body_max_chars,
-            }
-        )
+        event = {
+            "event": "whoop_http_response",
+            "channel": channel,
+            "method": method,
+            "url": url,
+            "status_code": status_code,
+            "headers": self._sanitize_mapping(headers or {}),
+            "body": body,
+            "body_truncated": len(body_text) > self._http_log_body_max_chars,
+        }
+        if profile_name is not None:
+            event["profile"] = profile_name
+        self._log_http_event(event=event)
 
-    def _log_http_error(self, channel: str, method: str, url: str, error: str) -> None:
-        self._log_http_event(
-            event={
-                "event": "whoop_http_error",
-                "channel": channel,
-                "method": method,
-                "url": url,
-                "error": error,
-            }
-        )
+    def _log_http_error(
+        self,
+        channel: str,
+        method: str,
+        url: str,
+        error: str,
+        profile_name: str | None = None,
+    ) -> None:
+        event = {
+            "event": "whoop_http_error",
+            "channel": channel,
+            "method": method,
+            "url": url,
+            "error": error,
+        }
+        if profile_name is not None:
+            event["profile"] = profile_name
+        self._log_http_event(event=event)
 
     def _log_http_event(self, event: dict[str, Any]) -> None:
         if not self._http_log_enabled:
@@ -773,6 +875,8 @@ class WhoopClient:
                 "refresh_token",
                 "access_token",
                 "code",
+                "api_token",
+                "x-api-key",
             }:
                 masked[key] = self._mask_value(value)
             elif lower_key == "client_id":
