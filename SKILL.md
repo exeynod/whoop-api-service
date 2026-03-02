@@ -1,6 +1,6 @@
 ---
 name: whoop-api-service
-description: Use this skill for requests about WHOOP recovery/sleep/strain/workout/body measurements data through the local Whoop Service proxy. Trigger when user asks to fetch data from /recovery/today, /day/yesterday, /week, /cycles, /workouts, /measurements/body, /measurements/body/history.
+description: Use this skill for requests about WHOOP recovery/sleep/strain/workout/body measurements data through the local Whoop Service proxy. Trigger when user asks to fetch current recovery, sleep, strain, training history, or body measurements.
 metadata: {"openclaw":{"skillKey":"whoopApiService","requires":{"env":["WHOOP_SERVICE_BASE_URL","WHOOP_SERVICE_TOKEN"]},"primaryEnv":"WHOOP_SERVICE_TOKEN"}}
 ---
 
@@ -13,43 +13,90 @@ Use this skill for any request that should go through this local service instead
 - `WHOOP_SERVICE_BASE_URL` (required service base URL; use only `${WHOOP_SERVICE_BASE_URL}`, never hardcode host or IP)
 - `WHOOP_SERVICE_TOKEN` (value for header `X-API-Key`)
 
-## Trigger Rules (RU)
+---
 
-Use this skill when the request is about WHOOP data via this service.
+## Use Cases & Recommended Calls
 
-Trigger words and phrases (Russian):
+### Daily Heartbeat (07:00 MSK) — 2 calls
+**Purpose**: Check current recovery and previous day's sleep/strain
 
-- `восстановление сегодня`
-- `recovery за сегодня`
-- `восстановление вчера`
-- `сон и нагрузка за вчера`
-- `сон за сегодня`
-- `сводка за неделю`
-- `недельная статистика whoop`
-- `нагрузка за неделю`
-- `strain за вчера`
-- `sleep за вчера`
-- `история циклов whoop`
-- `циклы за месяц`
-- `тренировки whoop`
-- `workouts за период`
-- `измерения тела whoop`
-- `body measurements`
-- `вес и рост whoop`
-- `история измерений`
-- `recovery sleep strain`
+```bash
+# Call 1: Current recovery
+curl -sS "${WHOOP_SERVICE_BASE_URL}/recovery/today" \
+  -H "X-API-Key: ${WHOOP_SERVICE_TOKEN}"
+
+# Call 2: Yesterday's data
+curl -sS "${WHOOP_SERVICE_BASE_URL}/day/yesterday" \
+  -H "X-API-Key: ${WHOOP_SERVICE_TOKEN}"
+```
+
+**Timing**: Back-to-back OK, no sleep needed  
+**Expect**: Instant responses (cached)
+
+---
+
+### Weekly Review (Sunday) — 2 calls
+**Purpose**: Overview of 7 days + current cycle metrics
+
+```bash
+# Call 1: 7-day snapshot
+curl -sS "${WHOOP_SERVICE_BASE_URL}/week" \
+  -H "X-API-Key: ${WHOOP_SERVICE_TOKEN}"
+
+# Call 2: Weekly rollup (1 point per week)
+curl -sS "${WHOOP_SERVICE_BASE_URL}/cycles?start=2026-02-01T00:00:00%2B03:00&end=2026-03-02T23:59:59%2B03:00&limit=25" \
+  -H "X-API-Key: ${WHOOP_SERVICE_TOKEN}"
+```
+
+**Timing**: 2-3 sec sleep between calls (rate limit safety)  
+**Expect**: `/week` instant, `/cycles` may have pagination (next_token)
+
+---
+
+### Monthly Analysis (1st of month) — 3 calls with pagination
+**Purpose**: Full month history + workouts + measurements
+
+```bash
+# Call 1: Get cycles for the month
+curl -sS "${WHOOP_SERVICE_BASE_URL}/cycles?start=2026-02-01T00:00:00%2B03:00&end=2026-03-02T23:59:59%2B03:00&limit=25" \
+  -H "X-API-Key: ${WHOOP_SERVICE_TOKEN}"
+
+# If response has next_token, sleep 5 sec then call:
+sleep 5
+curl -sS "${WHOOP_SERVICE_BASE_URL}/cycles?start=2026-02-01T00:00:00%2B03:00&end=2026-03-02T23:59:59%2B03:00&limit=25&next_token=<TOKEN>" \
+  -H "X-API-Key: ${WHOOP_SERVICE_TOKEN}"
+
+# Call 2: Get workouts for the month (usually 25 per page)
+sleep 5
+curl -sS "${WHOOP_SERVICE_BASE_URL}/workouts?start=2026-02-01T00:00:00%2B03:00&end=2026-03-02T23:59:59%2B03:00&limit=25" \
+  -H "X-API-Key: ${WHOOP_SERVICE_TOKEN}"
+
+# If workouts has next_token, paginate with 5 sec sleep between calls
+
+# Call 3: Current body measurements
+sleep 5
+curl -sS "${WHOOP_SERVICE_BASE_URL}/measurements/body" \
+  -H "X-API-Key: ${WHOOP_SERVICE_TOKEN}"
+```
+
+**Timing**: Sleep 5 sec **between each call**  
+**Expect**: Cycles may need pagination (next_token), workouts will need pagination
+
+---
 
 ## Route Map
 
 Protected routes (must send `X-API-Key: ${WHOOP_SERVICE_TOKEN}`):
 
-- `GET /recovery/today`
-- `GET /day/yesterday`
-- `GET /week`
-- `GET /cycles`
-- `GET /workouts`
-- `GET /measurements/body`
-- `GET /measurements/body/history`
+- `GET /recovery/today` — Current recovery (cached, updates after sleep)
+- `GET /day/yesterday` — Yesterday's strain & sleep (cached)
+- `GET /week` — 7-day snapshot (cached)
+- `GET /cycles` — Recovery/HRV/Sleep history with pagination (cached)
+- `GET /workouts` — Training history with pagination (cached)
+- `GET /measurements/body` — Current weight/height/max HR (live, no cache)
+- `GET /measurements/body/history` — Historical measurements with pagination (local snapshots only)
+
+---
 
 ## Call Rules
 
@@ -60,216 +107,99 @@ Protected routes (must send `X-API-Key: ${WHOOP_SERVICE_TOKEN}`):
 - Do not send JSON body for these `GET` endpoints.
 - For collection pagination use only `next_token` (snake_case).
 - For `/cycles`, `/workouts`, `/measurements/body/history`, `start` is required and must include timezone offset (ISO8601 datetime).
-- For `/cycles`, `next_token` (if present) must be `YYYY-MM-DD`.
-- For `/measurements/body/history`, `next_token` (if present) must be `YYYY-MM-DD`.
-- For `/cycles`, `/workouts`, `/measurements/body/history`, keep `limit` in `1..25` (default `10`).
+- For `/cycles` and `/measurements/body/history`, `next_token` (if present) must be `YYYY-MM-DD`.
+- For `/cycles`, `/workouts`, `/measurements/body/history`, keep `limit` in `1..25` (recommend `limit=25` for months, `limit=10` for weeks).
 - For `/cycles`, `/workouts`, `/measurements/body/history`, enforce range depth `<= 365 days` (`end - start`).
 - For `/cycles` and `/measurements/body/history`, if range is over 14 days, expect weekly averaged output (roughly one point per week).
 
+---
+
+## Rate Limiting
+
+**Service enforces rate limits** — if you get `429 Too Many Requests`:
+
+- **Between pagination calls**: Sleep 5 seconds minimum
+- **Between different endpoints**: Sleep 2-3 seconds minimum
+- **Heartbeat (2 calls)**: No sleep needed, calls are sequential
+- **Monthly analysis (3+ calls)**: Sleep 5 seconds between each
+
+**Strategy**:
+- Heartbeat: 2 calls back-to-back (fast, <1s total)
+- Weekly: 2 calls with 3 sec sleep (safe)
+- Monthly: Loop with 5 sec sleep between each paginated call
+
+---
+
 ## Response Contracts
 
-- `/recovery/today`:
-  - `200 pending`: `{"status":"pending","reason":"..."}`
-  - `200 ready`: `{"status":"ready","date":"YYYY-MM-DD","recovery_score":0-100,"recovery_zone":"green|yellow|red","hrv_ms":<int>,"resting_hr_bpm":<int>,"spo2_percentage"?:<float>,"skin_temp_celsius"?:<float>,"user_calibrating"?:<bool>,"timezone_offset":"+03:00","cached":<bool>}`
-- `/day/yesterday`:
-  - `200 ready`: `{"status":"ready","date":"YYYY-MM-DD","strain":{...},"sleep":{"disturbance_count"?:<int>,"sleep_cycle_count"?:<int>,"consistency_percentage"?:<int>,"efficiency_percentage"?:<int>,"sleep_needed_hours"?:<float>,"sleep_debt_hours"?:<float>,"strain_related_need_hours"?:<float>,...},"timezone_offset":"+03:00","cached":<bool>}`
-- `/week`:
-  - `200`: `{"period":{"from":"YYYY-MM-DD","to":"YYYY-MM-DD"},"days":[{"status":"ready"| "missing", ...}]}`
-- `/cycles`:
-  - `200 ready`: `{"status":"ready","period":{"from":"YYYY-MM-DD","to":"YYYY-MM-DD"},"days":[...],"next_token":<string|null>,"timezone_offset":"+03:00","cached":<bool>}`
-- `/workouts`:
-  - `200 ready`: `{"status":"ready","period":{"from":"YYYY-MM-DD","to":"YYYY-MM-DD"},"workouts":[{"sport_name":"...","zone_durations"?:{...},...}],"next_token":<string|null>,"timezone_offset":"+03:00","cached":<bool>}`
-- `/measurements/body`:
-  - `200 ready`: `{"status":"ready","measured_at":"ISO8601","height_meter"?:<float>,"weight_kilogram"?:<float>,"max_heart_rate"?:<int>,"timezone_offset":"+03:00","cached":false}`
-  - `200 pending`: `{"status":"pending","reason":"Body measurements are not available yet."}`
-- `/measurements/body/history`:
-  - `200 ready`: `{"status":"ready","period":{"from":"YYYY-MM-DD","to":"YYYY-MM-DD"},"measurements":[{"date":"YYYY-MM-DD","measured_at":"ISO8601",...}],"next_token":<string|null>,"timezone_offset":"+03:00","cached":true}`
-  - `200 pending`: `{"status":"pending","reason":"Body measurements are not available yet."}`
-- Errors:
-  - `401`: invalid/missing API key (`{"detail":"Unauthorized"}`)
-  - `401`: reauthorization required (`{"status":"error","reason":"Reauthorization required"}`)
-  - `502`: upstream WHOOP timeout/unavailable or unexpected payload, payload `{"status":"error","reason":"...","detail":"..."?}`
+### `/recovery/today`
+- `200 pending`: `{"status":"pending","reason":"..."}`
+- `200 ready`: `{"status":"ready","date":"YYYY-MM-DD","recovery_score":0-100,"recovery_zone":"green|yellow|red","hrv_ms":<int>,"resting_hr_bpm":<int>,"spo2_percentage"?:<float>,"skin_temp_celsius"?:<float>,"user_calibrating"?:<bool>,"timezone_offset":"+03:00","cached":<bool>}`
 
-## Behavior Notes (Important)
+### `/day/yesterday`
+- `200 ready`: `{"status":"ready","date":"YYYY-MM-DD","strain":{"score":<float>,"kilojoules":<int>,"avg_hr_bpm":<int>,"max_hr_bpm":<int>},"sleep":{"score":<int>,"total_hours":<float>,"consistency_percentage"?:<int>,"efficiency_percentage"?:<int>,"stages":{"deep_hours":<float>,"rem_hours":<float>,"light_hours":<float>,"awake_hours":<float>}},"timezone_offset":"+03:00","cached":<bool>}`
 
-- Service timezone defaults to `Europe/Moscow`.
-- `/recovery/today`:
-  - caches only `ready` response;
-  - replays latest `pending` within min interval (default 300s) without extra upstream call.
-- `/day/yesterday`:
-  - returns yesterday relative to service timezone;
-  - caches `ready` response.
-- `/week`:
-  - returns 7-day window from `yesterday-6` to `yesterday`;
-  - can include mix of `ready` and `missing` days.
-- `/cycles`, `/workouts`:
-  - support `start`, `end`, `limit`, `next_token`;
-  - return `ready` with `cached` flag and `timezone_offset`;
-  - use range-cache (TTL by service config).
-- `/cycles`:
-  - for ranges `>14` days, service returns weekly rollup (averaged numeric fields).
-- `/measurements/body`:
-  - always requests live upstream snapshot;
-  - does not serve from cache;
-  - saves `ready` payload as local snapshot for history.
-- `/measurements/body/history`:
-  - reads only local snapshots;
-  - local pagination by `date` with `next_token=YYYY-MM-DD`;
-  - for ranges `>14` days, returns weekly averaged points;
-  - no upstream calls.
+### `/week`
+- `200`: `{"period":{"from":"YYYY-MM-DD","to":"YYYY-MM-DD"},"days":[{"date":"YYYY-MM-DD","status":"ready|missing","recovery_score":<int>,"recovery_zone":"green|yellow|red","hrv_ms":<int>,"resting_hr_bpm":<int>,"strain_score":<float>,"sleep_score":<int>,"sleep_hours":<float>}]}`
 
-## Curl Templates
+### `/cycles`
+- `200 ready`: `{"status":"ready","period":{"from":"YYYY-MM-DD","to":"YYYY-MM-DD"},"days":[{"date":"YYYY-MM-DD","recovery_score":<int>,"recovery_zone":"green|yellow|red","hrv_ms":<int>,"resting_hr_bpm":<int>,"strain_score":<float>,"sleep_score":<int>,"sleep_hours":<float>,"sleep_consistency_percentage":<int>}],"next_token":<string|null>,"timezone_offset":"+03:00","cached":<bool>}`
 
-Scenario (RU request): `Покажи восстановление за сегодня` or `Какой recovery сегодня?`
+### `/workouts`
+- `200 ready`: `{"status":"ready","period":{"from":"YYYY-MM-DD","to":"YYYY-MM-DD"},"workouts":[{"workout_id":"...","date":"YYYY-MM-DD","sport_name":"volleyball|ice-hockey|weightlifting|functional-fitness|...","strain_score":<float>,"average_hr_bpm":<int>,"max_hr_bpm":<int>,"kilojoules":<int>,"zone_durations":{"zone_zero_milli":<int>,"zone_one_milli":<int>,"zone_two_milli":<int>,"zone_three_milli":<int>,"zone_four_milli":<int>,"zone_five_milli":<int>}}],"next_token":<string|null>,"timezone_offset":"+03:00","cached":<bool>}`
 
-```bash
-curl -sS "${WHOOP_SERVICE_BASE_URL}/recovery/today" \
-  -H "X-API-Key: ${WHOOP_SERVICE_TOKEN}"
-```
+### `/measurements/body`
+- `200 ready`: `{"status":"ready","measured_at":"ISO8601","height_meter":<float>,"weight_kilogram":<float>,"max_heart_rate":<int>,"timezone_offset":"+03:00","cached":false}`
+- `200 pending`: `{"status":"pending","reason":"Body measurements are not available yet."}`
 
-Example response (`ready`):
+### `/measurements/body/history`
+- `200 ready`: `{"status":"ready","period":{"from":"YYYY-MM-DD","to":"YYYY-MM-DD"},"measurements":[{"date":"YYYY-MM-DD","measured_at":"ISO8601","height_meter"?:<float>,"weight_kilogram"?:<float>,"max_heart_rate"?:<int>}],"next_token":<string|null>,"timezone_offset":"+03:00","cached":true}`
+- `200 pending`: `{"status":"pending","reason":"Body measurements are not available yet."}`
 
-```json
-{
-  "status": "ready",
-  "date": "2026-03-02",
-  "recovery_score": 74,
-  "recovery_zone": "yellow",
-  "hrv_ms": 52,
-  "resting_hr_bpm": 48,
-  "spo2_percentage": 96.5,
-  "skin_temp_celsius": 33.8,
-  "user_calibrating": false,
-  "timezone_offset": "+03:00",
-  "cached": false
-}
-```
+### Error Responses
+- `401`: `{"detail":"Unauthorized"}` — invalid/missing API key
+- `401`: `{"status":"error","reason":"Reauthorization required"}` — manual reauth needed in Whoop app
+- `429`: `{"detail":"Too Many Requests"}` — rate limit hit, wait 5+ sec
+- `502`: `{"status":"error","reason":"Unexpected Whoop response","detail":"..."}` — upstream error, retry with 10 sec delay
 
-Example response (`pending`):
+---
 
-```json
-{
-  "status": "pending",
-  "reason": "Sleep not yet complete. Recovery will be available after wake."
-}
-```
+## Behavior Notes
 
-Scenario (RU request): `Дай сон и нагрузку за вчера` or `Покажи вчерашний день`
+- **Service timezone**: Europe/Moscow (UTC+3)
+- **Range limit**: Max 365 days per request (`end - start <= 365 days`)
+- **Weekly rollup**: For ranges > 14 days, returns ~1 point per week (averaged metrics)
+- **Caching**:
+  - `/recovery/today`: Caches `ready` only, replays `pending` without upstream call
+  - `/day/yesterday`: Caches all `ready` responses
+  - `/week`: Caches 7-day snapshot
+  - `/cycles`, `/workouts`: Range-cached (TTL by service config)
+  - `/measurements/body`: **No cache**, always fresh
+  - `/measurements/body/history`: Local snapshots only, no upstream calls
+- **Pagination**: Use `next_token` if present (not null), follow with same params + `&next_token=<TOKEN>`
 
-```bash
-curl -sS "${WHOOP_SERVICE_BASE_URL}/day/yesterday" \
-  -H "X-API-Key: ${WHOOP_SERVICE_TOKEN}"
-```
+---
 
-Example response:
+## Trigger Rules (RU)
 
-```json
-{
-  "status": "ready",
-  "date": "2026-03-01",
-  "strain": {
-    "score": 14.2,
-    "kilojoules": 1823,
-    "avg_hr_bpm": 112,
-    "max_hr_bpm": 171
-  },
-  "sleep": {
-    "score": 81,
-    "total_hours": 7.4,
-    "performance_percent": 88,
-    "respiratory_rate": 15.2,
-    "disturbance_count": 3,
-    "sleep_cycle_count": 5,
-    "consistency_percentage": 92,
-    "efficiency_percentage": 89,
-    "sleep_needed_hours": 7.5,
-    "sleep_debt_hours": 0.2,
-    "strain_related_need_hours": 0.5,
-    "stages": {
-      "deep_hours": 1.6,
-      "rem_hours": 1.9,
-      "light_hours": 3.2,
-      "awake_hours": 0.7
-    }
-  },
-  "timezone_offset": "+03:00",
-  "cached": true
-}
-```
+Use this skill when the request is about:
 
-Scenario (RU request): `Собери недельную сводку` or `Покажи статистику за неделю`
+- Current recovery (восстановление сегодня, recovery сегодня, какой recovery)
+- Sleep/strain data (сон за вчера, нагрузка за вчера, strain)
+- Weekly overview (сводка за неделю, статистика за неделю)
+- Historical cycles (циклы за период, история за месяц)
+- Training history (тренировки, workouts, какие были тренировки)
+- Body measurements (вес, рост, измерения тела, weight, height)
 
-```bash
-curl -sS "${WHOOP_SERVICE_BASE_URL}/week" \
-  -H "X-API-Key: ${WHOOP_SERVICE_TOKEN}"
-```
-
-Example response:
-
-```json
-{
-  "period": {
-    "from": "2026-02-23",
-    "to": "2026-03-01"
-  },
-  "days": [
-    {
-      "date": "2026-02-23",
-      "status": "ready",
-      "recovery_score": 70,
-      "recovery_zone": "yellow",
-      "hrv_ms": 50,
-      "resting_hr_bpm": 49,
-      "strain_score": 12.0,
-      "sleep_score": 82,
-      "sleep_hours": 7.1
-    },
-    {
-      "date": "2026-02-24",
-      "status": "missing"
-    }
-  ]
-}
-```
-
-Scenario (RU request): `Покажи циклы за период` or `История циклов за месяц`
-
-```bash
-curl -sS "${WHOOP_SERVICE_BASE_URL}/cycles?start=2026-02-01T00:00:00%2B03:00&end=2026-03-02T00:00:00%2B03:00&limit=10" \
-  -H "X-API-Key: ${WHOOP_SERVICE_TOKEN}"
-```
-
-Scenario (RU request): `Покажи тренировки за период` or `Какие были workouts`
-
-```bash
-curl -sS "${WHOOP_SERVICE_BASE_URL}/workouts?start=2026-02-01T00:00:00%2B03:00&end=2026-03-02T00:00:00%2B03:00&limit=10" \
-  -H "X-API-Key: ${WHOOP_SERVICE_TOKEN}"
-```
-
-Scenario (RU request): `Покажи актуальные измерения тела` or `Какой сейчас вес/рост`
-
-```bash
-curl -sS "${WHOOP_SERVICE_BASE_URL}/measurements/body" \
-  -H "X-API-Key: ${WHOOP_SERVICE_TOKEN}"
-```
-
-Scenario (RU request): `Покажи историю измерений тела за период`
-
-```bash
-curl -sS "${WHOOP_SERVICE_BASE_URL}/measurements/body/history?start=2026-02-01T00:00:00%2B03:00&end=2026-03-02T00:00:00%2B03:00&limit=10" \
-  -H "X-API-Key: ${WHOOP_SERVICE_TOKEN}"
-```
-
-Follow-up page (only if previous response has non-null `next_token`):
-
-```bash
-curl -sS "${WHOOP_SERVICE_BASE_URL}/workouts?start=2026-02-01T00:00:00%2B03:00&end=2026-03-02T00:00:00%2B03:00&limit=10&next_token=<TOKEN_FROM_PREVIOUS_RESPONSE>" \
-  -H "X-API-Key: ${WHOOP_SERVICE_TOKEN}"
-```
+---
 
 ## Minimal Execution Policy
 
-- Usually perform one service call per user request.
-- If user asks for a follow-up that needs additional calls, run only required next call(s).
-- If protected endpoint returns `401` with `{"detail":"Unauthorized"}`, ask user to provide/verify `WHOOP_SERVICE_TOKEN`.
-- If endpoint returns `401` with `reason="Reauthorization required"`, explicitly tell the user manual reauthorization is required and stop; do not attempt any autonomous actions.
+- **Heartbeat (daily)**: Execute exactly 2 calls (recovery/today + day/yesterday), expect instant cached responses
+- **Weekly**: Execute week + cycles (2 calls), handle pagination if next_token present
+- **Monthly**: Execute cycles + workouts + measurements/body in sequence, handle pagination with 5 sec sleep
+- If user asks for follow-up, run only required next call(s)
+- If `401 Unauthorized`: ask user to verify `WHOOP_SERVICE_TOKEN`
+- If `401 Reauthorization required`: tell user manual Whoop app reauth is required, stop
+- If `429`: wait 5-10 seconds and retry (automatic backoff in exec)
+- If `502`: log error, suggest retry in 10 seconds (upstream issue)
