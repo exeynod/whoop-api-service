@@ -195,6 +195,11 @@ class WhoopClient:
             }
 
         record = self._pick_record_for_day(records, target_date)
+        if record is None:
+            return {
+                "status": "pending",
+                "reason": "Sleep not yet complete. Recovery will be available after wake.",
+            }
         if self._score_state(record) != "SCORED":
             return {
                 "status": "pending",
@@ -614,14 +619,11 @@ class WhoopClient:
         utc_dt = dt.astimezone(timezone.utc)
         return utc_dt.replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
-    def _pick_record_for_day(self, records: list[dict[str, Any]], target_date: date) -> dict[str, Any]:
-        if not records:
-            raise UnexpectedWhoopResponseError("No records to pick from")
-
+    def _pick_record_for_day(self, records: list[dict[str, Any]], target_date: date) -> dict[str, Any] | None:
         for record in records:
             if self._record_matches_day(record, target_date):
                 return record
-        return records[0]
+        return None
 
     def _pick_scored_cycle(
         self,
@@ -655,12 +657,6 @@ class WhoopClient:
             if filter_out_naps and bool(record.get("nap")):
                 continue
             if self._record_matches_day(record, target_date):
-                scoped.append(record)
-
-        if not scoped:
-            for record in records:
-                if filter_out_naps and bool(record.get("nap")):
-                    continue
                 scoped.append(record)
 
         for record in scoped:

@@ -9,7 +9,7 @@ import pytest
 import respx
 
 from app.config import get_settings
-from app.whoop_client import ReauthorizationRequiredError, WhoopClient
+from app.whoop_client import ReauthorizationRequiredError, UnexpectedWhoopResponseError, WhoopClient
 
 
 def _write_profile_file(
@@ -222,6 +222,49 @@ async def test_fetch_recovery_returns_pending_when_not_scored():
 
 @pytest.mark.unit
 @pytest.mark.asyncio
+async def test_fetch_recovery_ignores_records_from_other_day():
+    settings = get_settings()
+    client = WhoopClient(settings)
+    now = datetime.now(timezone.utc)
+    _write_profile_file(
+        settings.token_path,
+        profile_name="denis",
+        api_token="api-denis",
+        access_token="access",
+        refresh_token="refresh",
+        expires_at=now + timedelta(hours=1),
+        refresh_expires_at=now + timedelta(days=7),
+    )
+
+    with respx.mock(assert_all_called=True) as mock:
+        mock.get(f"{settings.whoop_api_base_url}/v2/recovery").respond(
+            200,
+            json={
+                "records": [
+                    {
+                        "score_state": "SCORED",
+                        "start": "2026-02-28T01:00:00Z",
+                        "end": "2026-02-28T05:00:00Z",
+                        "score": {
+                            "recovery_score": 80,
+                            "resting_heart_rate": 45,
+                            "hrv_rmssd_milli": 60,
+                        },
+                    }
+                ]
+            },
+        )
+
+        result = await client.fetch_recovery("denis", date(2026, 2, 27))
+
+    assert result == {
+        "status": "pending",
+        "reason": "Sleep not yet complete. Recovery will be available after wake.",
+    }
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
 async def test_fetch_yesterday_snapshot_maps_cycle_and_sleep_payloads():
     settings = get_settings()
     client = WhoopClient(settings)
@@ -289,6 +332,68 @@ async def test_fetch_yesterday_snapshot_maps_cycle_and_sleep_payloads():
 
 @pytest.mark.unit
 @pytest.mark.asyncio
+async def test_fetch_yesterday_snapshot_rejects_other_day_cycle():
+    settings = get_settings()
+    client = WhoopClient(settings)
+    now = datetime.now(timezone.utc)
+    _write_profile_file(
+        settings.token_path,
+        profile_name="denis",
+        api_token="api-denis",
+        access_token="access",
+        refresh_token="refresh",
+        expires_at=now + timedelta(hours=1),
+        refresh_expires_at=now + timedelta(days=7),
+    )
+
+    with respx.mock(assert_all_called=True) as mock:
+        mock.get(f"{settings.whoop_api_base_url}/v2/cycle").respond(
+            200,
+            json={
+                "records": [
+                    {
+                        "score_state": "SCORED",
+                        "end": "2026-02-27T02:00:00Z",
+                        "score": {
+                            "strain": 15.6,
+                            "kilojoule": 1999,
+                            "average_heart_rate": 120,
+                            "max_heart_rate": 176,
+                        },
+                    }
+                ]
+            },
+        )
+        mock.get(f"{settings.whoop_api_base_url}/v2/activity/sleep").respond(
+            200,
+            json={
+                "records": [
+                    {
+                        "score_state": "SCORED",
+                        "nap": False,
+                        "end": "2026-02-26T05:30:00Z",
+                        "score": {
+                            "sleep_performance_percentage": 88,
+                            "respiratory_rate": 15.2,
+                            "stage_summary": {
+                                "total_in_bed_time_milli": 26640000,
+                                "total_awake_time_milli": 2520000,
+                                "total_light_sleep_time_milli": 11520000,
+                                "total_rem_sleep_time_milli": 6840000,
+                                "total_slow_wave_sleep_time_milli": 5760000,
+                            },
+                        },
+                    }
+                ]
+            },
+        )
+
+        with pytest.raises(UnexpectedWhoopResponseError):
+            await client.fetch_yesterday_snapshot("denis", date(2026, 2, 26))
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
 async def test_fetch_week_day_returns_missing_when_any_source_absent():
     settings = get_settings()
     client = WhoopClient(settings)
@@ -307,6 +412,85 @@ async def test_fetch_week_day_returns_missing_when_any_source_absent():
         mock.get(f"{settings.whoop_api_base_url}/v2/cycle").respond(200, json={"records": []})
         mock.get(f"{settings.whoop_api_base_url}/v2/recovery").respond(200, json={"records": []})
         mock.get(f"{settings.whoop_api_base_url}/v2/activity/sleep").respond(200, json={"records": []})
+
+        result = await client.fetch_week_day("denis", date(2026, 2, 25))
+
+    assert result == {"date": "2026-02-25", "status": "missing"}
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_fetch_week_day_returns_missing_when_records_are_other_day():
+    settings = get_settings()
+    client = WhoopClient(settings)
+    now = datetime.now(timezone.utc)
+    _write_profile_file(
+        settings.token_path,
+        profile_name="denis",
+        api_token="api-denis",
+        access_token="access",
+        refresh_token="refresh",
+        expires_at=now + timedelta(hours=1),
+        refresh_expires_at=now + timedelta(days=7),
+    )
+
+    with respx.mock(assert_all_called=True) as mock:
+        mock.get(f"{settings.whoop_api_base_url}/v2/cycle").respond(
+            200,
+            json={
+                "records": [
+                    {
+                        "score_state": "SCORED",
+                        "end": "2026-02-26T01:00:00Z",
+                        "score": {
+                            "strain": 12.0,
+                            "kilojoule": 1000,
+                            "average_heart_rate": 100,
+                            "max_heart_rate": 170,
+                        },
+                    }
+                ]
+            },
+        )
+        mock.get(f"{settings.whoop_api_base_url}/v2/recovery").respond(
+            200,
+            json={
+                "records": [
+                    {
+                        "score_state": "SCORED",
+                        "end": "2026-02-26T01:00:00Z",
+                        "score": {
+                            "recovery_score": 70,
+                            "resting_heart_rate": 50,
+                            "hrv_rmssd_milli": 45,
+                        },
+                    }
+                ]
+            },
+        )
+        mock.get(f"{settings.whoop_api_base_url}/v2/activity/sleep").respond(
+            200,
+            json={
+                "records": [
+                    {
+                        "score_state": "SCORED",
+                        "nap": False,
+                        "end": "2026-02-26T01:00:00Z",
+                        "score": {
+                            "sleep_performance_percentage": 85,
+                            "respiratory_rate": 14.4,
+                            "stage_summary": {
+                                "total_in_bed_time_milli": 25200000,
+                                "total_awake_time_milli": 1800000,
+                                "total_light_sleep_time_milli": 10800000,
+                                "total_rem_sleep_time_milli": 5400000,
+                                "total_slow_wave_sleep_time_milli": 4500000,
+                            },
+                        },
+                    }
+                ]
+            },
+        )
 
         result = await client.fetch_week_day("denis", date(2026, 2, 25))
 

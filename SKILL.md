@@ -1,6 +1,6 @@
 ---
 name: whoop-api-service
-description: Use this skill for requests about WHOOP recovery/sleep/strain data through the local Whoop Service proxy in profile-based multi-user mode. Trigger when user asks to fetch data from /recovery/today, /day/yesterday, /week.
+description: Use this skill for requests about WHOOP recovery/sleep/strain data through the local Whoop Service proxy. Trigger when user asks to fetch data from /recovery/today, /day/yesterday, /week.
 metadata: {"openclaw":{"skillKey":"whoopApiService","requires":{"env":["WHOOP_SERVICE_BASE_URL","WHOOP_SERVICE_TOKEN"]},"primaryEnv":"WHOOP_SERVICE_TOKEN"}}
 ---
 
@@ -10,9 +10,8 @@ Use this skill for any request that should go through this local service instead
 
 ## Required Environment
 
-- `WHOOP_SERVICE_BASE_URL` (example: `http://127.0.0.1:8001`)
-- `WHOOP_SERVICE_TOKEN` (profile API token used as value for header `X-API-Key`)
-- Optional local label: `WHOOP_SERVICE_PROFILE` (human-readable profile name for operator context; not sent in request)
+- `WHOOP_SERVICE_BASE_URL` (required service base URL; use only `${WHOOP_SERVICE_BASE_URL}`, never hardcode host or IP)
+- `WHOOP_SERVICE_TOKEN` (value for header `X-API-Key`)
 
 ## Trigger Rules (RU)
 
@@ -31,14 +30,10 @@ Trigger words and phrases (Russian):
 - `strain за вчера`
 - `sleep за вчера`
 - `recovery sleep strain`
-- `по моему профилю`
-- `для пользователя`
-- `по другому пользователю`
-- `сравни профили`
 
 ## Route Map
 
-Protected routes (must send `X-API-Key: ${WHOOP_SERVICE_TOKEN}`; token resolves active profile):
+Protected routes (must send `X-API-Key: ${WHOOP_SERVICE_TOKEN}`):
 
 - `GET /recovery/today`
 - `GET /day/yesterday`
@@ -48,11 +43,8 @@ Protected routes (must send `X-API-Key: ${WHOOP_SERVICE_TOKEN}`; token resolves 
 
 - Use only the service endpoints listed in this skill.
 - Prefer `curl` for service calls.
+- Always call endpoints via `${WHOOP_SERVICE_BASE_URL}`; never hardcode `127.0.0.1` or any fixed host.
 - For protected routes always send header `X-API-Key`.
-- Treat `X-API-Key` as profile selector: one request always runs in exactly one profile context.
-- Never assume one token can represent multiple users.
-- If user asks data for another profile/user, require that profile token explicitly before making calls.
-- For profile comparison requests, run separate calls per profile token and clearly label results by profile.
 - Do not send JSON body for these `GET` endpoints.
 
 ## Response Contracts
@@ -65,26 +57,21 @@ Protected routes (must send `X-API-Key: ${WHOOP_SERVICE_TOKEN}`; token resolves 
 - `/week`:
   - `200`: `{"period":{"from":"YYYY-MM-DD","to":"YYYY-MM-DD"},"days":[{"status":"ready"| "missing", ...}]}`
 - Errors:
-  - `401`: invalid/missing API key, or token does not map to an active profile
+  - `401`: invalid/missing API key
   - `502`: upstream WHOOP issues or reauthorization required, payload `{"status":"error","reason":"...","detail":"..."?}`
 
 ## Behavior Notes (Important)
 
 - Service timezone defaults to `Europe/Moscow`.
-- Data isolation is profile-scoped:
-  - `X-API-Key` resolves profile;
-  - WHOOP OAuth tokens are used per resolved profile.
 - `/recovery/today`:
   - caches only `ready` response;
-  - replays latest `pending` within min interval (default 300s) without extra upstream call;
-  - cache and pending window are isolated per profile.
+  - replays latest `pending` within min interval (default 300s) without extra upstream call.
 - `/day/yesterday`:
   - returns yesterday relative to service timezone;
-  - caches `ready` response per profile.
+  - caches `ready` response.
 - `/week`:
   - returns 7-day window from `yesterday-6` to `yesterday`;
-  - can include mix of `ready` and `missing` days;
-  - cache is isolated per profile.
+  - can include mix of `ready` and `missing` days.
 
 ## Curl Templates
 
@@ -192,5 +179,5 @@ Example response:
 
 - Usually perform one service call per user request.
 - If user asks for a follow-up that needs additional calls, run only required next call(s).
-- If protected endpoint returns `401`, ask user to provide/verify profile token (`WHOOP_SERVICE_TOKEN`) for the intended user.
-- If endpoint returns `502` with reauthorization message, explicitly tell the user manual reauthorization is required for that profile and stop; do not attempt any autonomous actions.
+- If protected endpoint returns `401`, ask user to provide/verify `WHOOP_SERVICE_TOKEN`.
+- If endpoint returns `502` with reauthorization message, explicitly tell the user manual reauthorization is required and stop; do not attempt any autonomous actions.
