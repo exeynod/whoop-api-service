@@ -10,6 +10,7 @@ from fastapi import Depends, FastAPI
 from app.auth_router import router as auth_router
 from app.config import Settings, get_settings
 from app.deps import get_cache, get_whoop_client
+from app.logging_setup import configure_whoop_file_logger
 from app.models import HealthResponse
 from app.router import router as data_router
 from app.whoop_client import WhoopClient
@@ -19,6 +20,7 @@ from app.whoop_client import WhoopClient
 async def lifespan(app: FastAPI):
     settings = get_settings()
     cache = get_cache()
+    configure_whoop_file_logger(settings)
 
     cache.cleanup_expired()
     scheduler = BackgroundScheduler(timezone=settings.timezone)

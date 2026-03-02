@@ -24,6 +24,7 @@ Copy `.env.example` to `.env` and set values:
 - `WHOOP_HTTP_LOG_LEVEL=INFO`
 - `WHOOP_HTTP_LOG_BODY_MAX_CHARS=4000`
 - `WHOOP_HTTP_LOG_REDACT_SENSITIVE=true`
+- `WHOOP_HTTP_LOG_FILE_DIR=/tmp`
 
 ## Local Run
 

@@ -45,6 +45,7 @@ class Settings(BaseSettings):
         default=True,
         alias="WHOOP_HTTP_LOG_REDACT_SENSITIVE",
     )
+    whoop_http_log_file_dir: Path = Field(default=Path("/tmp"), alias="WHOOP_HTTP_LOG_FILE_DIR")
 
     model_config = SettingsConfigDict(
         env_file=".env",
