@@ -273,6 +273,22 @@ def test_workout_zone_durations_to_minutes_and_duration():
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("raw,expected", [(1.0, 100.0), (0.85, 85.0), (100, 100.0), (90, 90.0)])
+def test_workout_percent_recorded_fraction_normalized_to_percentage(raw, expected):
+    # WHOOP v2 returns percent_recorded as a 0..1 fraction (confirmed via live data);
+    # the contract and the agent's '< 90' rule expect a 0..100 percentage.
+    record = {
+        "id": "w1",
+        "start": "2026-05-31T14:00:00+03:00",
+        "end": "2026-05-31T15:00:00+03:00",
+        "score_state": "SCORED",
+        "score": {"percent_recorded": raw},
+    }
+    block = cn.normalize_workout(record, MSK)
+    assert block["percent_recorded"] == expected
+
+
+@pytest.mark.unit
 def test_workout_without_id_or_times_is_skipped():
     assert cn.normalize_workout({"sport_name": "run"}, MSK) is None
     assert cn.normalize_workout({"id": "w1"}, MSK) is None

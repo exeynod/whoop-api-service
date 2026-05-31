@@ -320,7 +320,7 @@ def normalize_workout(record: dict[str, Any], tz: ZoneInfo, *, detail: str = "fu
                 "created_at": iso_offset(record.get("created_at"), tz),
                 "updated_at": iso_offset(record.get("updated_at"), tz),
                 "source_timezone_offset": source_timezone_offset(record, tz, instant=start_raw),
-                "percent_recorded": _opt_round(_first_number(score_block, ["percent_recorded"]), 1),
+                "percent_recorded": _percent(_first_number(score_block, ["percent_recorded"])),
                 "distance_meter": _opt_round(_first_number(score_block, ["distance_meter"]), 2),
                 "altitude_gain_meter": _opt_round(_first_number(score_block, ["altitude_gain_meter"]), 2),
                 "altitude_change_meter": _opt_round(_first_number(score_block, ["altitude_change_meter"]), 2),
@@ -467,6 +467,17 @@ def _opt_int(value: Any) -> int | None:
 def _opt_round(value: Any, digits: int) -> float | None:
     number = _first_number({"v": value}, ["v"])
     return round(number, digits) if number is not None else None
+
+
+def _percent(value: Any) -> float | None:
+    """WHOOP v2 returns workout percent_recorded as a 0..1 fraction; the coach
+    contract and the agent's '< 90' rule expect a 0..100 percentage (a fully
+    recorded workout is 100.0, not 1.0). Values already on a 0..100 scale pass
+    through unchanged."""
+    number = _first_number({"v": value}, ["v"])
+    if number is None:
+        return None
+    return round(number * 100, 1) if number <= 1.0 else round(number, 1)
 
 
 def _opt_str(value: Any) -> str | None:
