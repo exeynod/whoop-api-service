@@ -66,6 +66,8 @@ class FileCache:
         endpoint: str,
         range_key: str,
         ttl_seconds: int,
+        *,
+        require_ready: bool = True,
     ) -> dict | None:
         path = self._range_path_for(profile_name, endpoint, range_key)
         if not path.exists():
@@ -86,7 +88,7 @@ class FileCache:
         saved_at = self._parse_datetime(saved_at_raw)
         if saved_at is None:
             return None
-        if payload.get("status") != "ready":
+        if require_ready and payload.get("status") != "ready":
             return None
 
         now_utc = datetime.now(timezone.utc)
@@ -94,8 +96,16 @@ class FileCache:
             return None
         return payload
 
-    def save_range_ready(self, profile_name: str, endpoint: str, range_key: str, payload: dict) -> bool:
-        if payload.get("status") != "ready":
+    def save_range_ready(
+        self,
+        profile_name: str,
+        endpoint: str,
+        range_key: str,
+        payload: dict,
+        *,
+        require_ready: bool = True,
+    ) -> bool:
+        if require_ready and payload.get("status") != "ready":
             return False
 
         path = self._range_path_for(profile_name, endpoint, range_key)

@@ -8,6 +8,7 @@ from apscheduler.triggers.cron import CronTrigger
 from fastapi import Depends, FastAPI
 
 from app.auth_router import router as auth_router
+from app.coach_router import router as coach_router
 from app.config import Settings, get_settings
 from app.deps import get_cache, get_whoop_client
 from app.logging_setup import configure_whoop_file_logger
@@ -41,6 +42,7 @@ def create_app() -> FastAPI:
     )
     app.include_router(auth_router)
     app.include_router(data_router)
+    app.include_router(coach_router)
 
     @app.get("/health", response_model=HealthResponse, tags=["system"])
     async def health(
