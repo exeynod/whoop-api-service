@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 from fastapi.testclient import TestClient
+from freezegun import freeze_time
 
 import app.router as data_router
 from app.config import get_settings
@@ -422,7 +423,10 @@ def test_yesterday_returns_502_when_upstream_fails_without_cache():
 
 
 @pytest.mark.smoke
+@freeze_time("2026-02-27 10:00:00", tz_offset=3)
 def test_week_partial_cache_merge(tmp_cache_dir):
+    # freeze so the lifespan startup cache cleanup (which uses the real clock)
+    # does not purge the pre-seeded Feb dated cache as "expired".
     fake = FakeWhoopClient()
     now_dt = datetime(2026, 2, 27, 10, 0, tzinfo=ZoneInfo("Europe/Moscow"))
 
