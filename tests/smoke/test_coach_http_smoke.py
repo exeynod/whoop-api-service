@@ -64,6 +64,45 @@ class CoachFakeClient:
             raise self._coach_exc
         return _coach_day_payload(target_date, include_raw=include_raw, detail=detail)
 
+    async def fetch_coach_range(self, profile_name, end_date, days):
+        self.range_calls = getattr(self, "range_calls", 0) + 1
+        self.last_range = {"end_date": end_date, "days": days}
+        rows = [
+            {
+                "date": (end_date).isoformat(),
+                "recovery_score": 74,
+                "recovery_zone": "green",
+                "hrv_ms": 63,
+                "resting_hr_bpm": 48,
+                "spo2_percentage": 98.0,
+                "skin_temp_celsius": 36.4,
+                "recovery_score_state": "SCORED",
+                "sleep_started_at": f"{end_date.isoformat()}T02:00:00+03:00",
+                "sleep_ended_at": f"{end_date.isoformat()}T08:00:00+03:00",
+                "sleep_total_hours": 6.4,
+                "sleep_deep_hours": 0.9,
+                "sleep_rem_hours": 1.2,
+                "sleep_light_hours": 4.3,
+                "sleep_efficiency_percentage": 84,
+                "sleep_performance_percentage": 71,
+                "sleep_consistency_percentage": 42,
+                "sleep_respiratory_rate": 16.1,
+                "sleep_disturbance_count": 12,
+                "strain_score": 14.2,
+                "strain_is_final": True,
+                "kilojoules": 2400,
+                "workout_count": 1,
+                "workout_sports": ["volleyball"],
+            }
+        ]
+        return {
+            "period": {"from": end_date.isoformat(), "to": end_date.isoformat(), "days": days, "timezone": "Europe/Moscow"},
+            "rows": rows,
+            "workouts": [{"workout_id": "w1", "sport_name": "volleyball", "started_at": f"{end_date.isoformat()}T14:00:00+03:00"}],
+            "nap_count": 0,
+            "errors": [],
+        }
+
     async def fetch_coach_status(self, profile_name):
         return {
             "status": "ok",
@@ -224,3 +263,65 @@ def test_coach_upstream_timeout_maps_to_502():
 
     assert response.status_code == 502
     assert response.json()["reason"] == "Whoop API timeout"
+
+
+@pytest.mark.smoke
+def test_coach_week_returns_summary_days_and_workouts():
+    fake = CoachFakeClient()
+    with _client(fake, NOW) as client:
+        response = client.get("/coach/week", headers=HEADERS)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ready"
+    assert body["period"]["days"] == 7
+    assert body["summary"]["avg_recovery_score"] == 74.0
+    assert body["summary"]["volleyball_count"] == 1
+    assert len(body["days"]) == 1
+    assert len(body["workouts"]) == 1
+    assert fake.last_range == {"end_date": date(2026, 2, 27), "days": 7}
+
+
+@pytest.mark.smoke
+def test_coach_week_defaults_to_today_and_caches():
+    fake = CoachFakeClient()
+    with _client(fake, NOW) as client:
+        client.get("/coach/week", headers=HEADERS)
+        client.get("/coach/week", headers=HEADERS)
+
+    assert fake.range_calls == 1  # shared bundle cache
+
+
+@pytest.mark.smoke
+def test_coach_training_context_load_summary():
+    fake = CoachFakeClient()
+    with _client(fake, NOW) as client:
+        response = client.get("/coach/training-context?days=14", headers=HEADERS)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert "load_summary" in body
+    assert "strain_ratio_7d_vs_prev_7d" in body["load_summary"]
+    assert len(body["daily_load"]) == 1
+    assert fake.last_range == {"end_date": date(2026, 2, 27), "days": 14}
+
+
+@pytest.mark.smoke
+def test_coach_sleep_and_recovery_context():
+    fake = CoachFakeClient()
+    with _client(fake, NOW) as client:
+        sleep_ctx = client.get("/coach/sleep-context", headers=HEADERS)
+        recovery_ctx = client.get("/coach/recovery-context", headers=HEADERS)
+
+    assert sleep_ctx.status_code == 200
+    assert sleep_ctx.json()["summary"]["avg_total_hours"] == 6.4
+    assert recovery_ctx.status_code == 200
+    assert recovery_ctx.json()["summary"]["green_days"] == 1
+
+
+@pytest.mark.smoke
+def test_coach_context_routes_require_api_key():
+    fake = CoachFakeClient()
+    with _client(fake, NOW) as client:
+        for path in ("/coach/week", "/coach/training-context", "/coach/sleep-context", "/coach/recovery-context"):
+            assert client.get(path).status_code == 401

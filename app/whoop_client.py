@@ -639,6 +639,128 @@ class WhoopClient:
             }
         return response
 
+    async def fetch_coach_range(self, profile_name: str, end_date: date, days: int) -> dict[str, Any]:
+        """Fetch one window and build per-day rows for week/context aggregates.
+
+        Returns a neutral bundle (period, rows, workouts, nap_count, errors) that
+        the router shapes into /coach/week and the *-context responses. Pulls each
+        collection once and reuses the per-day _pick_* correlation.
+        """
+        from app import coach_normalize as cn
+
+        await self._ensure_access_token(profile_name=profile_name)
+        start_date = end_date - timedelta(days=days - 1)
+        window_start, _ = self._day_bounds_utc(start_date - timedelta(days=1))
+        _, window_end = self._day_bounds_utc(end_date)
+
+        errors: list[dict[str, Any]] = []
+        cycles, cyc_err = await self._safe_collection(profile_name, "/v2/cycle", window_start, window_end)
+        recoveries, rec_err = await self._safe_collection(profile_name, "/v2/recovery", window_start, window_end)
+        sleeps, sleep_err = await self._safe_collection(profile_name, "/v2/activity/sleep", window_start, window_end)
+        workouts, wo_err = await self._safe_collection(
+            profile_name, "/v2/activity/workout", window_start, window_end
+        )
+        for block_name, err in (
+            ("cycles", cyc_err),
+            ("recovery", rec_err),
+            ("sleep", sleep_err),
+            ("workouts", wo_err),
+        ):
+            if err is not None:
+                errors.append({"block": block_name, "reason": err})
+
+        rows: list[dict[str, Any]] = []
+        current = start_date
+        while current <= end_date:
+            sleep_rec = self._pick_scored_sleep_for_day(sleeps, current) or self._coach_sleep_fallback(
+                sleeps, current
+            )
+            cycle_rec = self._pick_cycle_for_sleep_day(cycles, current, sleep_rec)
+            recovery_rec = self._pick_recovery_for_sleep_cycle(
+                recoveries, current, sleep_rec
+            ) or self._coach_recovery_fallback(recoveries, sleep_rec, current)
+            day_workouts = [
+                w for w in (cn.normalize_workout(rec, self._tz, detail="surface") for rec in workouts)
+                if w and w["date"] == current.isoformat()
+            ]
+            rows.append(self._coach_day_row(current, recovery_rec, sleep_rec, cycle_rec, day_workouts))
+            current += timedelta(days=1)
+
+        all_workouts = [
+            w
+            for w in (cn.normalize_workout(rec, self._tz, detail="full") for rec in workouts)
+            if w and start_date <= date.fromisoformat(w["date"]) <= end_date
+        ]
+        all_workouts.sort(key=lambda w: w.get("started_at") or "")
+
+        nap_count = sum(
+            1
+            for rec in sleeps
+            if bool(rec.get("nap"))
+            and (d := self._record_datetime(rec, "end")) is not None
+            and start_date <= d.astimezone(self._tz).date() <= end_date
+        )
+
+        return {
+            "period": {
+                "from": start_date.isoformat(),
+                "to": end_date.isoformat(),
+                "days": days,
+                "timezone": self.settings.timezone,
+            },
+            "rows": rows,
+            "workouts": all_workouts,
+            "nap_count": nap_count,
+            "errors": errors,
+        }
+
+    def _coach_day_row(
+        self,
+        target_date: date,
+        recovery_rec: dict[str, Any] | None,
+        sleep_rec: dict[str, Any] | None,
+        cycle_rec: dict[str, Any] | None,
+        day_workouts: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        from app import coach_normalize as cn
+
+        recovery = cn.normalize_recovery(recovery_rec, self._tz, detail="full")
+        sleep = cn.normalize_sleep(sleep_rec, self._tz, detail="full")
+        strain = cn.normalize_day_strain(cycle_rec, self._tz, target_date=target_date, detail="surface")
+
+        rec_ready = recovery.get("status") == "ready"
+        sleep_ready = sleep.get("status") == "ready"
+        strain_ready = strain.get("status") == "ready"
+        stages = sleep.get("stages", {}) if sleep_ready else {}
+        stage_summary = sleep.get("stage_summary", {}) if sleep_ready else {}
+
+        return {
+            "date": target_date.isoformat(),
+            "recovery_score": recovery.get("score") if rec_ready else None,
+            "recovery_zone": recovery.get("zone") if rec_ready else None,
+            "hrv_ms": recovery.get("hrv_ms") if rec_ready else None,
+            "resting_hr_bpm": recovery.get("resting_hr_bpm") if rec_ready else None,
+            "spo2_percentage": recovery.get("spo2_percentage") if rec_ready else None,
+            "skin_temp_celsius": recovery.get("skin_temp_celsius") if rec_ready else None,
+            "recovery_score_state": recovery.get("score_state"),
+            "sleep_started_at": sleep.get("started_at") if sleep_ready else None,
+            "sleep_ended_at": sleep.get("ended_at") if sleep_ready else None,
+            "sleep_total_hours": sleep.get("total_hours") if sleep_ready else None,
+            "sleep_deep_hours": stages.get("deep_hours"),
+            "sleep_rem_hours": stages.get("rem_hours"),
+            "sleep_light_hours": stages.get("light_hours"),
+            "sleep_efficiency_percentage": sleep.get("efficiency_percentage") if sleep_ready else None,
+            "sleep_performance_percentage": sleep.get("performance_percentage") if sleep_ready else None,
+            "sleep_consistency_percentage": sleep.get("consistency_percentage") if sleep_ready else None,
+            "sleep_respiratory_rate": sleep.get("respiratory_rate") if sleep_ready else None,
+            "sleep_disturbance_count": stage_summary.get("disturbance_count"),
+            "strain_score": strain.get("score") if strain_ready else None,
+            "strain_is_final": bool(strain.get("is_final")) if strain_ready else False,
+            "kilojoules": strain.get("kilojoules") if strain_ready else None,
+            "workout_count": len(day_workouts),
+            "workout_sports": [w["sport_name"] for w in day_workouts],
+        }
+
     async def fetch_coach_status(self, profile_name: str) -> dict[str, Any]:
         """Technical health: WHOOP auth + coach cache freshness (read by router)."""
         now = datetime.now(self._tz)
