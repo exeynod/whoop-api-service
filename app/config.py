@@ -39,6 +39,19 @@ class Settings(BaseSettings):
     cache_retention_days: int = Field(default=30, alias="CACHE_RETENTION_DAYS")
     range_ready_ttl_seconds: int = Field(default=43200, alias="RANGE_READY_TTL_SECONDS")
     range_pending_ttl_seconds: int = Field(default=300, alias="RANGE_PENDING_TTL_SECONDS")
+
+    # Coach (v2) per-block cache/freshness policy.
+    # recovery/sleep stay fresh the whole day after they become ready; day_strain and
+    # workouts refresh on a ~45 min heartbeat window; body is good for ~12h.
+    coach_recovery_ttl_seconds: int = Field(default=86400, alias="COACH_RECOVERY_TTL_SECONDS")
+    coach_sleep_ttl_seconds: int = Field(default=86400, alias="COACH_SLEEP_TTL_SECONDS")
+    coach_day_strain_ttl_seconds: int = Field(default=2700, alias="COACH_DAY_STRAIN_TTL_SECONDS")
+    coach_workouts_ttl_seconds: int = Field(default=2700, alias="COACH_WORKOUTS_TTL_SECONDS")
+    coach_body_ttl_seconds: int = Field(default=43200, alias="COACH_BODY_TTL_SECONDS")
+    # Single concrete fresh/stale threshold for heartbeat blocks (45 min).
+    coach_freshness_stale_seconds: int = Field(default=2700, alias="COACH_FRESHNESS_STALE_SECONDS")
+    # Range TTL for week/context aggregates (45 min).
+    coach_aggregate_ttl_seconds: int = Field(default=2700, alias="COACH_AGGREGATE_TTL_SECONDS")
     whoop_http_log_enabled: bool = Field(default=True, alias="WHOOP_HTTP_LOG_ENABLED")
     whoop_http_log_level: str = Field(default="INFO", alias="WHOOP_HTTP_LOG_LEVEL")
     whoop_http_log_body_max_chars: int = Field(default=4000, alias="WHOOP_HTTP_LOG_BODY_MAX_CHARS")
