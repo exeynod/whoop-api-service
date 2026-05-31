@@ -506,6 +506,325 @@ class WhoopClient:
             }
         return {"status": "ready", **mapped}
 
+    # ------------------------------------------------------------------ #
+    # Coach (v2) layer
+    # ------------------------------------------------------------------ #
+    async def fetch_coach_day(
+        self,
+        profile_name: str,
+        target_date: date,
+        *,
+        include_raw: bool = False,
+        detail: str = "full",
+    ) -> dict[str, Any]:
+        """Assemble the full normalized coach-day object for ``target_date``.
+
+        Pulls recovery/cycle/sleep/workout collections (each tolerant to its own
+        failure) plus the body measurement, correlates records with the SAME
+        ``_pick_*`` helpers the legacy endpoints use, and normalizes via
+        ``coach_normalize``. A single block failing degrades the response to
+        ``status="partial"`` instead of crashing the whole request.
+        """
+        from app import coach_normalize as cn
+
+        await self._ensure_access_token(profile_name=profile_name)
+        now = datetime.now(self._tz)
+        prev_date = target_date - timedelta(days=1)
+
+        # Window covers prev day (previous_day_strain / workouts_yesterday) and
+        # the night that wakes into target_date.
+        window_start, _ = self._day_bounds_utc(prev_date - timedelta(days=1))
+        _, window_end = self._day_bounds_utc(target_date)
+
+        errors: list[dict[str, Any]] = []
+        cycles, cyc_err = await self._safe_collection(profile_name, "/v2/cycle", window_start, window_end)
+        recoveries, rec_err = await self._safe_collection(profile_name, "/v2/recovery", window_start, window_end)
+        sleeps, sleep_err = await self._safe_collection(profile_name, "/v2/activity/sleep", window_start, window_end)
+        workouts, wo_err = await self._safe_collection(
+            profile_name, "/v2/activity/workout", window_start, window_end
+        )
+        body_payload, body_err, body_missing = await self._safe_body(profile_name)
+
+        # ---- correlate (reuse existing selection helpers) ----
+        # Prefer the SCORED record (consistent with /cycles); fall back to an
+        # unscored record so the block can report 'pending' instead of 'missing'.
+        sleep_today = self._pick_scored_sleep_for_day(sleeps, target_date) or self._coach_sleep_fallback(
+            sleeps, target_date
+        )
+        cycle_today = self._pick_cycle_for_sleep_day(cycles, target_date, sleep_today)
+        recovery_today = self._pick_recovery_for_sleep_cycle(
+            recoveries, target_date, sleep_today
+        ) or self._coach_recovery_fallback(recoveries, sleep_today, target_date)
+        sleep_prev = self._pick_scored_sleep_for_day(sleeps, prev_date)
+        cycle_prev = self._pick_cycle_for_sleep_day(cycles, prev_date, sleep_prev)
+
+        # ---- blocks ----
+        recovery = self._coach_block(
+            "recovery", lambda: cn.normalize_recovery(recovery_today, self._tz, detail=detail), rec_err, errors
+        )
+        sleep = self._coach_block(
+            "sleep", lambda: cn.normalize_sleep(sleep_today, self._tz, detail=detail), sleep_err, errors
+        )
+        day_strain = self._coach_block(
+            "day_strain",
+            lambda: cn.normalize_day_strain(cycle_today, self._tz, target_date=target_date, detail=detail),
+            cyc_err,
+            errors,
+        )
+        previous_day_strain = self._coach_block(
+            "previous_day_strain",
+            lambda: cn.normalize_day_strain(
+                cycle_prev, self._tz, target_date=prev_date, detail=detail, surface_only_block=True
+            ),
+            cyc_err,
+            errors,
+        )
+        workouts_today = self._coach_workout_list(workouts, target_date, detail, wo_err, errors, "workouts_today")
+        workouts_yesterday = self._coach_workout_list(
+            workouts, prev_date, detail, wo_err, errors, "workouts_yesterday"
+        )
+        body = self._coach_body_block(body_payload, body_err, body_missing, errors, detail)
+
+        # ---- freshness ----
+        stale = self.settings.coach_freshness_stale_seconds
+        freshness = {
+            "recovery": self._coach_freshness(recovery_today, recovery, "recovery", now, full_day=True),
+            "sleep": self._coach_freshness(sleep_today, sleep, "sleep", now, full_day=True),
+            "day_strain": self._coach_freshness(cycle_today, day_strain, "day_strain", now, stale=stale),
+            "workouts_today": self._coach_workouts_freshness(workouts_today, now, stale),
+            "body": cn.freshness_entry(
+                updated_at=body.get("measured_at"),
+                source=body.get("source", "whoop") if body.get("status") == "ready" else "whoop",
+                now=now,
+                tz=self._tz,
+                stale_after_seconds=self.settings.coach_body_ttl_seconds,
+            ),
+        }
+
+        # ---- raw refs ----
+        raw_refs = {
+            "cycle_id": cn._opt_int(cycle_today.get("id")) if cycle_today else None,
+            "sleep_id": cn._opt_str(sleep_today.get("id")) if sleep_today else None,
+            "workout_ids": [w["workout_id"] for w in workouts_today],
+            "body_measurement_id": None,
+        }
+
+        day_start = datetime.combine(target_date, datetime.min.time(), tzinfo=self._tz)
+        day_end = day_start + timedelta(days=1) - timedelta(seconds=1)
+        response: dict[str, Any] = {
+            "status": self._coach_top_status([recovery, sleep, day_strain], errors),
+            "date": target_date.isoformat(),
+            "timezone": self.settings.timezone,
+            "day_start": day_start.replace(microsecond=0).isoformat(),
+            "day_end": day_end.replace(microsecond=0).isoformat(),
+            "generated_at": now.replace(microsecond=0).isoformat(),
+            "freshness": freshness,
+            "recovery": recovery,
+            "sleep": sleep,
+            "day_strain": day_strain,
+            "previous_day_strain": previous_day_strain,
+            "workouts_today": workouts_today,
+            "workouts_yesterday": workouts_yesterday,
+            "body": body,
+            "raw_refs": raw_refs,
+            "errors": errors,
+        }
+        if include_raw:
+            response["raw"] = {
+                "cycle": cycle_today,
+                "recovery": recovery_today,
+                "sleep": sleep_today,
+                "workouts": [w for w in workouts if self._workout_on_day(w, target_date)],
+                "body": body_payload,
+            }
+        return response
+
+    async def fetch_coach_status(self, profile_name: str) -> dict[str, Any]:
+        """Technical health: WHOOP auth + coach cache freshness (read by router)."""
+        now = datetime.now(self._tz)
+        authorized = self.tokens_valid
+        return {
+            "status": "ok",
+            "service_time": now.replace(microsecond=0).isoformat(),
+            "timezone": self.settings.timezone,
+            "whoop": {
+                "authorized": authorized,
+                "reauthorization_required": not authorized,
+                "last_successful_sync": None,
+            },
+        }
+
+    async def _safe_collection(
+        self, profile_name: str, path: str, start_utc: datetime, end_utc: datetime
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        try:
+            records = await self._fetch_collection_all(profile_name, path, start_utc, end_utc)
+            return records, None
+        except ReauthorizationRequiredError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - degrade this block, keep others
+            return [], self._safe_reason(exc)
+
+    async def _safe_body(self, profile_name: str) -> tuple[dict[str, Any] | None, str | None, bool]:
+        try:
+            payload = await self.fetch_body_measurements(profile_name=profile_name)
+        except ReauthorizationRequiredError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            return None, self._safe_reason(exc), False
+        if payload.get("status") == "ready":
+            return payload, None, False
+        # pending/missing body is not an error per spec 13.2.
+        return None, None, True
+
+    @staticmethod
+    def _safe_reason(exc: Exception) -> str:
+        mapping = {
+            WhoopTimeoutError: "Whoop API timeout",
+            WhoopUnavailableError: "Whoop API unavailable",
+            UnexpectedWhoopResponseError: "Unexpected Whoop response",
+        }
+        for exc_type, reason in mapping.items():
+            if isinstance(exc, exc_type):
+                return reason
+        return "Whoop API unavailable"
+
+    @staticmethod
+    def _coach_block(name: str, builder, fetch_error: str | None, errors: list[dict[str, Any]]) -> dict[str, Any]:
+        if fetch_error is not None:
+            errors.append({"block": name, "reason": fetch_error})
+            return {"status": "error", "reason": fetch_error}
+        try:
+            return builder()
+        except Exception as exc:  # noqa: BLE001
+            reason = WhoopClient._safe_reason(exc)
+            errors.append({"block": name, "reason": reason})
+            return {"status": "error", "reason": reason}
+
+    def _coach_workout_list(
+        self,
+        workouts: list[dict[str, Any]],
+        target_date: date,
+        detail: str,
+        fetch_error: str | None,
+        errors: list[dict[str, Any]],
+        block_name: str,
+    ) -> list[dict[str, Any]]:
+        from app import coach_normalize as cn
+
+        if fetch_error is not None:
+            errors.append({"block": block_name, "reason": fetch_error})
+            return []
+        out: list[dict[str, Any]] = []
+        for record in workouts:
+            if not self._workout_on_day(record, target_date):
+                continue
+            mapped = cn.normalize_workout(record, self._tz, detail=detail)
+            if mapped:
+                out.append(mapped)
+        out.sort(key=lambda w: w.get("started_at") or "")
+        return out
+
+    def _coach_body_block(
+        self,
+        body_payload: dict[str, Any] | None,
+        body_err: str | None,
+        body_missing: bool,
+        errors: list[dict[str, Any]],
+        detail: str,
+    ) -> dict[str, Any]:
+        from app import coach_normalize as cn
+
+        if body_err is not None:
+            errors.append({"block": "body", "reason": body_err})
+            return {"status": "error", "reason": body_err}
+        if body_missing or body_payload is None:
+            return cn.normalize_body(None, self._tz, detail=detail)
+        return cn.normalize_body(body_payload, self._tz, source="whoop", detail=detail)
+
+    def _coach_sleep_fallback(self, sleeps: list[dict[str, Any]], target_date: date) -> dict[str, Any] | None:
+        candidates: list[tuple[datetime, dict[str, Any]]] = []
+        for record in sleeps:
+            if bool(record.get("nap")):
+                continue
+            end_dt = self._record_datetime(record, "end")
+            if end_dt is not None and end_dt.astimezone(self._tz).date() == target_date:
+                candidates.append((end_dt, record))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        return candidates[0][1]
+
+    def _coach_recovery_fallback(
+        self, recoveries: list[dict[str, Any]], sleep_today: dict[str, Any] | None, target_date: date
+    ) -> dict[str, Any] | None:
+        cycle_id = sleep_today.get("cycle_id") if sleep_today else None
+        if cycle_id is not None:
+            for record in recoveries:
+                if str(record.get("cycle_id")) == str(cycle_id):
+                    return record
+        for record in recoveries:
+            if self._record_matches_day(record, target_date):
+                return record
+        return None
+
+    def _workout_on_day(self, record: dict[str, Any], target_date: date) -> bool:
+        for key in ("start", "end"):
+            value = record.get(key)
+            parsed = self._parse_datetime(value) if isinstance(value, str) else None
+            if parsed is not None:
+                return parsed.astimezone(self._tz).date() == target_date
+        return False
+
+    def _coach_freshness(
+        self,
+        record: dict[str, Any] | None,
+        block: dict[str, Any],
+        name: str,
+        now: datetime,
+        *,
+        full_day: bool = False,
+        stale: int | None = None,
+    ) -> dict[str, Any]:
+        from app import coach_normalize as cn
+
+        if block.get("status") not in ("ready", "pending") or record is None:
+            return {"status": "missing", "updated_at": None, "source": "whoop"}
+        updated = record.get("updated_at") or record.get("created_at")
+        return cn.freshness_entry(
+            updated_at=updated if isinstance(updated, str) else None,
+            source="whoop",
+            now=now,
+            tz=self._tz,
+            stale_after_seconds=stale,
+            full_day_fresh=full_day,
+        )
+
+    def _coach_workouts_freshness(
+        self, workouts: list[dict[str, Any]], now: datetime, stale: int
+    ) -> dict[str, Any]:
+        from app import coach_normalize as cn
+
+        if not workouts:
+            return {"status": "missing", "updated_at": None, "source": "whoop"}
+        latest = max((w.get("updated_at") or w.get("ended_at") or "") for w in workouts)
+        return cn.freshness_entry(
+            updated_at=latest or None, source="whoop", now=now, tz=self._tz, stale_after_seconds=stale
+        )
+
+    @staticmethod
+    def _coach_top_status(required_blocks: list[dict[str, Any]], errors: list[dict[str, Any]]) -> str:
+        statuses = [b.get("status") for b in required_blocks]
+        if errors:
+            return "partial"
+        if all(s == "ready" for s in statuses):
+            return "ready"
+        if any(s == "ready" for s in statuses):
+            return "partial"
+        if "pending" in statuses:
+            return "pending"
+        return "missing"
+
     async def _ensure_access_token(self, profile_name: str, force_refresh: bool = False) -> str:
         async with self._token_lock:
             tokens = self._load_profile_tokens(profile_name)
