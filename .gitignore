@@ -10,3 +10,4 @@ secrets/whoop_tokens.json
 !secrets/.gitkeep
 tests/secrets/live_whoop.local.json
 docs/manual_token_get.sh
+cache/**

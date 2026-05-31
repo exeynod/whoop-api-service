@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   whoop-service:
     build: .
@@ -12,11 +10,10 @@ services:
       - ./cache:/cache
       - ./secrets:/secrets
     networks:
-      - openclaw_whoop_api
-    # Service is internal-only. Do not publish ports on VPS.
-    # OpenClaw should call http://whoop-service:8001 inside Docker network.
+      - nanobot-home_default
+    # Internal-only: no published ports.
+    # Nanobot agents reach it at http://whoop-service:8001 inside the network.
 
 networks:
-  openclaw_whoop_api:
-    name: openclaw_whoop_api
+  nanobot-home_default:
     external: true
