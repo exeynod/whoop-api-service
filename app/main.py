@@ -13,6 +13,7 @@ from app.config import Settings, get_settings
 from app.deps import get_cache, get_whoop_client
 from app.logging_setup import configure_whoop_file_logger
 from app.models import HealthResponse
+from app.raw_router import router as raw_router
 from app.router import router as data_router
 from app.whoop_client import WhoopClient
 
@@ -43,6 +44,7 @@ def create_app() -> FastAPI:
     app.include_router(auth_router)
     app.include_router(data_router)
     app.include_router(coach_router)
+    app.include_router(raw_router)
 
     @app.get("/health", response_model=HealthResponse, tags=["system"])
     async def health(

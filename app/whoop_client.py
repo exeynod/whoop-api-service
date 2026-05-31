@@ -639,6 +639,30 @@ class WhoopClient:
             }
         return response
 
+    async def fetch_raw_collection(
+        self,
+        profile_name: str,
+        path: str,
+        start: datetime,
+        end: datetime,
+        limit: int,
+        next_token: str | None,
+    ) -> dict[str, Any]:
+        """Low-level WHOOP collection passthrough for /raw/* (one page)."""
+        payload = await self._fetch_collection_page(
+            profile_name=profile_name,
+            path=path,
+            start_utc=start.astimezone(timezone.utc),
+            end_utc=end.astimezone(timezone.utc),
+            limit=limit,
+            next_token=next_token,
+        )
+        records = payload.get("records")
+        return {
+            "records": records if isinstance(records, list) else [],
+            "next_token": self._extract_next_token(payload),
+        }
+
     async def fetch_coach_range(self, profile_name: str, end_date: date, days: int) -> dict[str, Any]:
         """Fetch one window and build per-day rows for week/context aggregates.
 
