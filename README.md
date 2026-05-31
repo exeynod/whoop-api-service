@@ -2,6 +2,25 @@
 
 FastAPI proxy service between OpenClaw agent and WHOOP Developer API v2.
 
+## v2 Coach Layer
+
+The primary agent contract is the normalized, facts-only `/coach/*` layer (see
+`SKILL.md` for the full contract and surface-vs-drilldown usage rules):
+
+- `GET /coach/status` — service/WHOOP auth + per-block cache freshness.
+- `GET /coach/today` and `GET /coach/day/{YYYY-MM-DD}` — full coach-day object
+  (recovery, sleep assigned to wake-date, day/previous-day strain, workouts,
+  body) with per-block `status` + `freshness`, `raw_refs`, partial-tolerant
+  blocks, and optional `include_raw` / `detail=surface|full` / `refresh`.
+- `GET /coach/week`, `/coach/training-context`, `/coach/sleep-context`,
+  `/coach/recovery-context` — summaries + daily rows + trends.
+- `GET /coach/body/latest` — latest body measurement (`ready` or `missing`).
+- `GET /raw/cycles|recoveries|sleeps|workouts` — low-level WHOOP passthrough.
+
+The service returns facts and technical statuses only (no coach flags /
+recommendations). `/coach/today` is heartbeat-safe (cached, `refresh=true` to
+bypass). Old endpoints below remain for backward compatibility.
+
 ## Multi-User Roadmap
 
 Step 1 is documented: profile-based multi-user architecture, where

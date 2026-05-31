@@ -100,6 +100,35 @@ def test_cleanup_deletes_expired_range_cache_files(tmp_path):
 
 
 @pytest.mark.unit
+def test_range_cache_can_persist_non_ready_coach_payload(tmp_path):
+    cache = FileCache(cache_dir=tmp_path, timezone_name="Europe/Moscow", retention_days=30)
+    payload = {"status": "partial", "date": "2026-02-27"}
+
+    # default require_ready blocks non-ready; coach uses require_ready=False
+    assert cache.save_range_ready("denis", "coach_day", "k", payload) is False
+    assert cache.save_range_ready("denis", "coach_day", "k", payload, require_ready=False) is True
+
+    assert cache.load_range_ready("denis", "coach_day", "k", 2700) is None  # ready-only view
+    loaded = cache.load_range_ready("denis", "coach_day", "k", 2700, require_ready=False)
+    assert loaded == payload
+
+
+@pytest.mark.unit
+def test_cleanup_keeps_fresh_coach_range_and_removes_stale(tmp_path):
+    cache = FileCache(cache_dir=tmp_path, timezone_name="Europe/Moscow", retention_days=30)
+    cache.save_range_ready("denis", "coach_day", "fresh", {"status": "partial"}, require_ready=False)
+
+    stale = tmp_path / "denis" / "coach_day_range_old.json"
+    stale.write_text(json.dumps({"saved_at": "2000-01-01T00:00:00Z", "payload": {"status": "ready"}}), encoding="utf-8")
+
+    deleted = cache.cleanup_expired(today=date(2026, 2, 27))
+
+    assert not stale.exists()
+    # the freshly saved coach range survives cleanup (no date-suffix collision)
+    assert (tmp_path / "denis" / "coach_day_range_fresh.json").exists()
+
+
+@pytest.mark.unit
 def test_save_body_snapshot_and_load_history(tmp_path):
     cache = FileCache(cache_dir=tmp_path, timezone_name="Europe/Moscow", retention_days=30)
     snapshot_date = date(2026, 3, 2)
